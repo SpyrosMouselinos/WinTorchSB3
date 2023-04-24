@@ -18,6 +18,9 @@ from tqdm import tqdm
 from warmup_scheduler import GradualWarmupScheduler
 import shutil
 import numpy as np
+from torch.utils.data import DataLoader
+
+from wintorchsb3.expert_trace_extract import ExtractedModelPolicy, ppo_load_pong, MultiModalDS
 
 os.chdir('/'.join(os.path.dirname(__file__).split('/')[:-1]))
 CURRENT_DIR = os.getcwd()
@@ -27,25 +30,6 @@ GLOBAL_DTYPE = torch.bfloat16
 
 def save_checkpoint(state, filename='checkpoint'):
     torch.save(state, filename + '.pth.tar')
-
-
-class ExtractedModelPolicy(nn.Module):
-    def __init__(self, fe, an):
-        super().__init__()
-        self.fe = fe if fe is not None else nn.Identity()
-        self.an = an if an is not None else nn.Identity()
-
-    def forward(self, x, get_feats_and_actions=True):
-        x = x.float()
-        feats = self.fe(x)
-        actions = self.an(feats)
-        return feats, actions
-
-    def predict(self, x, get_feats_and_actions=True):
-        x = x.float()
-        feats = self.fe(x)
-        actions = self.an(feats)
-        return feats, actions
 
 
 class SupervisedAligner(nn.Module):
@@ -113,7 +97,7 @@ class SupervisedAligner(nn.Module):
             return f'You are an agent that plays the game of {game}. The best move is {oracle_token}. What is a bad move? '
         elif sent == 'pos':
             if game == 'Pong':
-                oracle_token = str(random.choice(list({0, 1, 2, 3, 4, 5}.difference(set([oracle_guess]))))) + '</s>'
+                oracle_token = str(random.choice(list({0, 1, 2, 3, 4, 5}.difference(set([oracle_guess])))))
             return f'You are an agent that plays the game of {game}. A bad move is {oracle_token}. What is a good move? '
         else:
             raise NotImplementedError
@@ -308,68 +292,6 @@ def load_llm(opt_version='facebook/opt-125m'):
     return lm, h_dim, tokenizer
 
 
-def dqn_load_pong():
-    checkpoint = load_from_hub("sb3/dqn-PongNoFrameskip-v4", "dqn-PongNoFrameskip-v4.zip")
-
-    custom_objects = {
-        "learning_rate": 0.0,
-        "lr_schedule": lambda _: 0.0,
-        "clip_range": lambda _: 0.0,
-        "exploration_schedule": lambda _: 0.0,
-        "optimize_memory_usage": False
-    }
-
-    model = DQN.load(checkpoint, custom_objects=custom_objects)
-    model.policy.set_training_mode(False)
-    extracted_preprocessing = lambda x: model.policy.obs_to_tensor(x.transpose((0, 3, 1, 2)))
-
-    extracted_model = ExtractedModelPolicy(fe=model.policy.q_net, an=None)
-
-    env = make_atari_env('PongNoFrameskip-v4', n_envs=1)
-    env = VecFrameStack(env, n_stack=4)
-    return env, extracted_model, extracted_preprocessing
-
-
-def ppo_load_pong():
-    checkpoint = load_from_hub("sb3/ppo-PongNoFrameskip-v4", "ppo-PongNoFrameskip-v4.zip")
-
-    custom_objects = {
-        "learning_rate": 0.0,
-        "lr_schedule": lambda _: 0.0,
-        "clip_range": lambda _: 0.0,
-    }
-
-    model = PPO.load(checkpoint, custom_objects=custom_objects, exact_match=False)
-    model.policy.set_training_mode(False)
-    extracted_preprocessing = lambda x: model.policy.obs_to_tensor(x.transpose((0, 3, 1, 2)))
-
-    extracted_model = ExtractedModelPolicy(fe=model.policy.features_extractor, an=model.policy.action_net)
-
-    env = make_atari_env('PongNoFrameskip-v4', n_envs=10)
-    env = VecFrameStack(env, n_stack=4)
-    return env, 'PongNoFrameskip-v4', extracted_model, extracted_preprocessing
-
-
-def main(args):
-    env, extracted_model, extracted_preprocessing = dqn_load_pong()
-    obs = env.reset()
-    episodic_reward = []
-    while True:
-        observation, vectorized_env = extracted_preprocessing(obs)
-        with torch.no_grad():
-            action, _ = extracted_model.predict(observation)
-        action = action.cpu().numpy().reshape((-1, 6)).argmax(-1)
-        obs, rewards, dones, info = env.step(action)
-        episodic_reward.append(rewards)
-        if not dones:
-            pass
-        else:
-            print("Episodic Reward")
-            print(sum(episodic_reward))
-            episodic_reward = []
-        env.render()
-
-
 def play(model, env_name='PongNoFrameskip-v4', sent='pos', render=True, fewshot=False):
     env = make_atari_env(env_name, n_envs=1)
     env = VecFrameStack(env, n_stack=4)
@@ -393,11 +315,18 @@ def play(model, env_name='PongNoFrameskip-v4', sent='pos', render=True, fewshot=
     return
 
 
-def align(supervised=True, steps=100_000, grad_clip=1, accum_steps=64, path=None, randomized_actions=0.0,
-          inverse_prompt=0.25):
+def align(epochs=10,
+          expert_steps=500_000,
+          llm='facebook/opt-125m',
+          grad_clip=1,
+          accum_steps=2,
+          path=None,
+          batch_size=128,
+          randomized_actions=0.05,
+          inverse_prompt=0.5):
     ##################################################################################################################
     env, env_name, extracted_model, extracted_preprocessing = ppo_load_pong()
-    lm, h_dim, tokenizer = load_llm()
+    lm, h_dim, tokenizer = load_llm(llm)
     model = SupervisedAligner(rl_model=extracted_model, rl_preprocess=extracted_preprocessing, lm=lm, h_dim=h_dim,
                               tokenizer=tokenizer, config='LinearProjectFeaturesToInput', normalize_actions=False)
     if path is not None:
@@ -407,7 +336,7 @@ def align(supervised=True, steps=100_000, grad_clip=1, accum_steps=64, path=None
     ################################################################################################################
     optimizer = torch.optim.AdamW(
         params=[
-            {'params': model.parameters(), 'lr': 0.005, 'weight_decay': 0.001}
+            {'params': model.parameters(), 'lr': 0.0005, 'weight_decay': 0.001}
         ],
         betas=(0.99, 0.95),
         eps=1e-8
@@ -417,33 +346,27 @@ def align(supervised=True, steps=100_000, grad_clip=1, accum_steps=64, path=None
     optimizer.step()
 
     ################################################################################################################
-    obs = env.reset()
     save_checkpoint({
         'state_dict': model.state_dict(),
         'optimizer': optimizer.state_dict(),
     }, './model_runs/zero_step')
 
-    possible_actions = {0, 1, 2, 3, 4, 5}
-    for step_idx in tqdm(range(steps)):
+    train_dataloader = DataLoader(
+        MultiModalDS(sources=['Pong'],
+                     n_examples=[expert_steps],
+                     n_jobs=[4], args=[{'random_act_prob': randomized_actions}]),
+        batch_size=batch_size,
+        shuffle=True)
+
+    for step_idx in tqdm(range(epochs * expert_steps)):
+        _, raw, feats, gt_action_logits = next(iter(train_dataloader))
+
         if random.uniform(0, 1) < inverse_prompt:
             use_negative_prompt = True
         else:
             use_negative_prompt = False
         _, loss, actions = model(obs, use_negative_prompt=use_negative_prompt)
-        # Pick random number #
-        if random.uniform(0, 1) < randomized_actions:
-            actions_ = []
-            for i in range(len(actions)):
-                actions_.append(random.choice(
-                    list(possible_actions.difference(
-                        set([actions[i]])
-                    ))
-                ))
-            actions = actions_
-        if len(actions) == 1:
-            actions = [actions]
         obs, rewards, dones, info = env.step(actions)
-        ##############
         loss = loss / accum_steps
         scaler.scale(loss).backward()
         if (step_idx + 1) % accum_steps == 0:
@@ -454,7 +377,7 @@ def align(supervised=True, steps=100_000, grad_clip=1, accum_steps=64, path=None
             scaler.update()
             optimizer.zero_grad()
 
-        if step_idx % 5000 == 4999:
+        if step_idx % 20_000 == 19_999:
             print(f"\nLoss @ step {step_idx}: {loss.item()}\n")
             print("\nPositive Score:")
             play(model, env_name, sent='pos', render=False)
@@ -465,11 +388,12 @@ def align(supervised=True, steps=100_000, grad_clip=1, accum_steps=64, path=None
             print("\nFewshot negative:")
             play(model, env_name, sent='neg', render=False, fewshot=True)
             obs = env.reset()
-        if step_idx % 5000 == 4999:
+        if step_idx % 50_000 == 49_999:
             save_checkpoint({
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-            }, f'./model_runs/step_{step_idx}_neg_prompt_25')
+            },
+                f'./model_runs/step_{step_idx}_neg_{inverse_prompt}_rand_{randomized_actions}_bs_{batch_size}_as_{accum_steps}')
 
     # env.render()
 
