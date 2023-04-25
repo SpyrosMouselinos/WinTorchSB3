@@ -364,7 +364,7 @@ def align(epochs=100,
 
     ################################################################################################################
     save_checkpoint({
-        'state_dict': model.state_dict(),
+        'state_dict': model.get_state_dict(),
         'optimizer': optimizer.state_dict(),
     }, '../model_runs/zero_step')
 
