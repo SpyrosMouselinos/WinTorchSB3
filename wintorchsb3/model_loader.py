@@ -22,10 +22,9 @@ from torch.utils.data import DataLoader
 
 from wintorchsb3.expert_trace_extract import ExtractedModelPolicy, ppo_load_pong, MultiModalDS
 
-os.chdir('/'.join(os.path.dirname(__file__).split('/')[:-1]))
+#os.chdir('/'.join(os.path.dirname(__file__).split('/')[:-1]))
 CURRENT_DIR = os.getcwd()
-
-GLOBAL_DTYPE = torch.bfloat16
+GLOBAL_DTYPE = torch.float32
 
 
 def save_checkpoint(state, filename='checkpoint'):
@@ -333,17 +332,17 @@ def play(model, env_name='PongNoFrameskip-v4', sent='pos', render=True, fewshot=
 
 
 def align(epochs=100,
-          expert_steps=1000,
+          expert_steps=100_000,
           llm='facebook/opt-125m',
           grad_clip=1,
-          accum_steps=2,
+          accum_steps=1,
           path=None,
-          batch_size=128,
+          batch_size=256,
           randomized_actions=0.05,
           inverse_prompt=0.5,
           log_freq=1000,
           save_freq=5000,
-          n_jobs=1):
+          n_jobs=4):
     ##################################################################################################################
     env, env_name, extracted_model, extracted_preprocessing = ppo_load_pong()
     lm, h_dim, tokenizer = load_llm(llm)
@@ -361,7 +360,7 @@ def align(epochs=100,
     ################################################################################################################
     optimizer = torch.optim.AdamW(
         params=[
-            {'params': model.parameters(), 'lr': 0.005, 'weight_decay': 0.001}
+            {'params': model.parameters(), 'lr': 0.001, 'weight_decay': 0.001}
         ],
         betas=(0.99, 0.95),
         eps=1e-8
@@ -420,6 +419,11 @@ def align(epochs=100,
                         'optimizer': optimizer.state_dict(),
                     },
                         f'./model_runs/step_{real_index}_neg_{inverse_prompt}_rand_{randomized_actions}_bs_{batch_size}_as_{accum_steps}')
+            # Save At End of Epoch #
+            save_checkpoint({
+                'state_dict': model.get_state_dict(),
+                'optimizer': optimizer.state_dict(),
+                },f'./model_runs/step_{real_index}_neg_{inverse_prompt}_rand_{randomized_actions}_bs_{batch_size}_as_{accum_steps}')
 
 
 def test_align(path=None, sent='pos', fewshot=False):
