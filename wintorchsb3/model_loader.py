@@ -1,26 +1,19 @@
-import copy
 import os
 import random
-
-import gym
 from argparse import ArgumentParser
-from stable_baselines3 import A2C, SAC, PPO, TD3, DQN
-from huggingface_sb3 import EnvironmentName, load_from_hub
 from stable_baselines3.common.env_util import make_atari_env
-from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.vec_env import VecFrameStack
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
-from torch.optim.lr_scheduler import StepLR
+
 from transformers import OPTForCausalLM, GPT2Tokenizer
 from tqdm import tqdm
-from warmup_scheduler import GradualWarmupScheduler
-import shutil
+
 import numpy as np
 from torch.utils.data import DataLoader
 
-from wintorchsb3.expert_trace_extract import ExtractedModelPolicy, ppo_load_pong, MultiModalDS
+from expert_trace_extract import ExtractedModelPolicy, ppo_load_pong, MultiModalDS
 
 #os.chdir('/'.join(os.path.dirname(__file__).split('/')[:-1]))
 CURRENT_DIR = os.getcwd()
