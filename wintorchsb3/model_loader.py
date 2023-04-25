@@ -47,6 +47,16 @@ class SupervisedAligner(nn.Module):
         self.initialize_game_prompt()
         self.normalize_actions = normalize_actions
 
+    def get_state_dict(self, efficient=True):
+        if not efficient:
+            return self.state_dict()
+        else:
+            ret_dict = {}
+            all_dict = self.state_dict()
+            for key in self.trainable_module_names:
+                ret_dict.update({key: all_dict[key]})
+            return ret_dict
+
     def initialize_commands(self):
         game = 'Pong'
         if game == 'Pong':
@@ -129,73 +139,8 @@ class SupervisedAligner(nn.Module):
             print(f"Initialized a Trainable Projection Layer from {512} to {self.h_dim} dims\n")
         else:
             raise NotImplementedError
+        self.trainable_module_names = ['trainable_game_mode_token', 'trainable_projection']
         return
-
-    def forward(self, obs, labels=None, use_oracle=True, use_negative_prompt=False):
-        with torch.no_grad():
-            processed_obs, _ = self.rl_preprocess(obs)
-            feats, actions = self.rl_model(processed_obs)
-            batch_size = feats.size()[0]
-        if use_oracle:
-            # Transform action to words #
-            tokenized_gt_action = torch.LongTensor(
-                [self.TOKENIZED_COMMANDS[f.item()]['input_ids'] for f in
-                 torch.argmax(actions, dim=-1).detach().cpu()]).cuda()
-            tokenized_ngt_action = torch.LongTensor(
-                [self.TOKENIZED_COMMANDS[f.item()]['input_ids'] for f in
-                 torch.argmin(actions, dim=-1).detach().cpu()]).cuda()
-            oracle_answer = torch.argmax(actions, dim=-1).cpu().numpy()
-        with torch.cuda.amp.autocast(dtype=GLOBAL_DTYPE):
-            if self.normalize_actions:
-                # action = torch.softmax(action, dim=-1)
-                actions = actions / (torch.norm(actions, p=1) + 1e-6)
-            if self.config == 'LinearProjectActionToInput':
-                llm_projected_features = self.trainable_projection(actions)
-            elif self.config == 'LinearProjectFeaturesToInput':
-                llm_projected_features = self.trainable_projection(feats)
-            else:
-                raise NotImplementedError
-            # Get representation of the game prompt #
-            if not use_negative_prompt:
-                feature_game_prompt = self.lm.model.decoder.embed_tokens(
-                    torch.LongTensor(self.TOKENIZED_PROMPT['input_ids']).cuda().unsqueeze(0))
-                # Get representation of the tokenized gt action/s #
-                feature_gt_action = self.lm.model.decoder.embed_tokens(tokenized_gt_action)
-                target_tokens = torch.cat(
-                    [torch.LongTensor(self.TOKENIZED_PROMPT['input_ids']).repeat(batch_size, 1).cuda(),
-                     tokenized_gt_action], dim=1)
-            else:
-                feature_game_prompt = self.lm.model.decoder.embed_tokens(
-                    torch.LongTensor(self.TOKENIZED_VAL_NEG_PROMPT['input_ids']).cuda().unsqueeze(0))
-                # Get representation of the tokenized gt action/s #
-                feature_gt_action = self.lm.model.decoder.embed_tokens(tokenized_ngt_action)
-                target_tokens = torch.cat(
-                    [torch.LongTensor(self.TOKENIZED_VAL_NEG_PROMPT['input_ids']).repeat(batch_size, 1).cuda(),
-                     tokenized_ngt_action], dim=1)
-
-            inp_tokens = torch.cat(
-                [self.trainable_game_mode_token.repeat(batch_size, 1, 1),  # SL 1 / TL 1
-                 llm_projected_features.unsqueeze(1),  # SL 1 / TL 2
-                 feature_game_prompt.repeat(batch_size, 1, 1),  # SL 19 / TL 21
-                 feature_gt_action], dim=1)  # SL 1 / TL 22
-
-            out_logits = self.lm(inputs_embeds=inp_tokens).logits
-
-        if use_oracle:
-            x = out_logits
-            y = target_tokens
-            loss_fct = CrossEntropyLoss()
-            shift_logits = x[..., 1:-1, :].contiguous()  # We do not care what TT and ACT maps to
-            shift_labels = y.contiguous()  # We care for all stuff here
-            loss = loss_fct(shift_logits.view(-1, x.size()[-1]), shift_labels.view(-1))
-            return None, loss, oracle_answer
-
-        else:
-            if labels is not None:
-                # Calc Loss Here #
-                return None, 0, 0
-            else:
-                return None, 0, None
 
     def translate_logits_to_button(self, responses):
         if isinstance(responses, list):
@@ -212,58 +157,131 @@ class SupervisedAligner(nn.Module):
                 env_moves.append(0)
         return env_moves
 
-    def reason(self, obs, question=None, use_oracle=True, sent='pos', fewshot=False):
+    def preprocess_game(self, feats, actions):
+        tokenized_gt_action = torch.LongTensor(
+            [self.TOKENIZED_COMMANDS[f.item()]['input_ids'] for f in
+             torch.argmax(actions, dim=-1).detach().cpu()]).cuda()
+        tokenized_ngt_action = torch.LongTensor(
+            [self.TOKENIZED_COMMANDS[f.item()]['input_ids'] for f in
+             torch.argmin(actions, dim=-1).detach().cpu()]).cuda()
+        oracle_answer = torch.argmax(actions, dim=-1).detach().cpu().numpy()
+
+        if self.normalize_actions:
+            actions = actions / (torch.norm(actions, p=1) + 1e-6)
+        if self.config == 'LinearProjectActionToInput':
+            llm_projected_features = self.trainable_projection(actions)
+        elif self.config == 'LinearProjectFeaturesToInput':
+            llm_projected_features = self.trainable_projection(feats)
+        else:
+            raise NotImplementedError
+        return tokenized_gt_action, tokenized_ngt_action, llm_projected_features, oracle_answer
+
+    def preprocess_raw_game(self, obs):
+        observation, _ = self.rl_preprocess(obs)
         with torch.no_grad():
-            processed_obs, _ = self.rl_preprocess(obs)
-            feats, actions = self.rl_model(processed_obs)
-            batch_size = feats.size()[0]
-        if use_oracle:
-            # Transform action to words #
-            tokenized_gt_action = torch.LongTensor(
-                [self.TOKENIZED_COMMANDS[f.item()]['input_ids'] for f in
-                 torch.argmax(actions, dim=-1).detach().cpu()]).cuda()
-            oracle_answer = torch.argmax(actions, dim=-1).cpu().numpy()
+            feats, actions = self.rl_model.predict(observation)
+        # actions = actions.resize((-1, 6))
+        return self.preprocess_game(feats, actions)
 
-        with torch.cuda.amp.autocast(dtype=GLOBAL_DTYPE):
-            if self.normalize_actions:
-                # action = torch.softmax(action, dim=-1)
-                actions = actions / (torch.norm(actions, p=1) + 1e-6)
-            if self.config == 'LinearProjectActionToInput':
-                llm_projected_features = self.trainable_projection(actions)
-            elif self.config == 'LinearProjectFeaturesToInput':
-                llm_projected_features = self.trainable_projection(feats)
-            else:
-                raise NotImplementedError
-            # Get representation of the game prompt #
+    def preprocess_question_train(self,
+                                  batch_size,
+                                  use_negative_prompt,
+                                  tokenized_gt_action,
+                                  tokenized_ngt_action):
 
-            if question is None:
-                if fewshot:
-                    question = self.initialize_fewshot_prompt(oracle_guess=oracle_answer, sent=sent)
-                else:
-                    if sent == 'pos':
-                        question = self.TOKENIZED_VAL_POS_PROMPT['input_ids']
-                    elif sent == 'neg':
-                        question = self.TOKENIZED_VAL_NEG_PROMPT['input_ids']
-                    elif sent == 'default':
-                        question = self.TOKENIZED_PROMPT['input_ids']
-
-            else:
-                question = self.tokenizer(question, add_special_tokens=True)['input_ids']
+        if not use_negative_prompt:
             feature_game_prompt = self.lm.model.decoder.embed_tokens(
-                torch.LongTensor(question).cuda().unsqueeze(
-                    0))
+                torch.LongTensor(self.TOKENIZED_PROMPT['input_ids']).cuda().unsqueeze(0))
+            # Get representation of the tokenized gt action/s #
+            feature_gt_action = self.lm.model.decoder.embed_tokens(tokenized_gt_action)
+            target_tokens = torch.cat(
+                [torch.LongTensor(self.TOKENIZED_PROMPT['input_ids']).repeat(batch_size, 1).cuda(),
+                 tokenized_gt_action], dim=1)
+        else:
+            feature_game_prompt = self.lm.model.decoder.embed_tokens(
+                torch.LongTensor(self.TOKENIZED_VAL_NEG_PROMPT['input_ids']).cuda().unsqueeze(0))
+            # Get representation of the tokenized gt action/s #
+            feature_gt_action = self.lm.model.decoder.embed_tokens(tokenized_ngt_action)
+            target_tokens = torch.cat(
+                [torch.LongTensor(self.TOKENIZED_VAL_NEG_PROMPT['input_ids']).repeat(batch_size, 1).cuda(),
+                 tokenized_ngt_action], dim=1)
+        return feature_game_prompt, feature_gt_action, target_tokens
 
-            inp_tokens = torch.cat(
-                [self.trainable_game_mode_token.repeat(batch_size, 1, 1),
-                 llm_projected_features.unsqueeze(1),
-                 feature_game_prompt.repeat(batch_size, 1, 1)], dim=1)
-            response = []
-            for i in range(3):
-                out_logits = self.lm(inputs_embeds=inp_tokens).logits
-                next_token = torch.argmax(out_logits[:, -1, :], -1)
-                response.append(next_token)
-                inp_tokens = torch.cat([inp_tokens, self.lm.model.decoder.embed_tokens(next_token).unsqueeze(1)], dim=1)
-            return response, None, oracle_answer
+    def preprocess_question_test(self,
+                                 question,
+                                 fewshot,
+                                 sent,
+                                 oracle_answer):
+        if question is None:
+            if fewshot:
+                question = self.initialize_fewshot_prompt(oracle_guess=oracle_answer, sent=sent)
+            else:
+                if sent == 'pos':
+                    question = self.TOKENIZED_VAL_POS_PROMPT['input_ids']
+                elif sent == 'neg':
+                    question = self.TOKENIZED_VAL_NEG_PROMPT['input_ids']
+                elif sent == 'default':
+                    question = self.TOKENIZED_PROMPT['input_ids']
+
+        else:
+            question = self.tokenizer(question, add_special_tokens=True)['input_ids']
+        feature_game_prompt = self.lm.model.decoder.embed_tokens(
+            torch.LongTensor(question).cuda().unsqueeze(
+                0))
+        return feature_game_prompt
+
+    def forward(self, feats, actions, use_negative_prompt=False):
+        batch_size = feats.size()[0]
+        tokenized_gt_action, \
+        tokenized_ngt_action, \
+        llm_projected_features, _ = self.preprocess_game(feats, actions)
+
+        feature_game_prompt, feature_gt_action, target_tokens = self.preprocess_question_train(batch_size=batch_size,
+                                                                                               use_negative_prompt=use_negative_prompt,
+                                                                                               tokenized_gt_action=tokenized_gt_action,
+                                                                                               tokenized_ngt_action=tokenized_ngt_action)
+
+        inp_tokens = torch.cat(
+            [self.trainable_game_mode_token.repeat(batch_size, 1, 1),  # SL 1 / TL 1
+             llm_projected_features.unsqueeze(1),  # SL 1 / TL 2
+             feature_game_prompt.repeat(batch_size, 1, 1),  # SL 19 / TL 21
+             feature_gt_action], dim=1)  # SL 1 / TL 22
+
+        out_logits = self.lm(inputs_embeds=inp_tokens).logits
+
+        x = out_logits
+        y = target_tokens
+        loss_fct = CrossEntropyLoss()
+        shift_logits = x[..., 1:-1, :].contiguous()
+        shift_labels = y.contiguous()
+        loss = loss_fct(shift_logits.view(-1, x.size()[-1]), shift_labels.view(-1))
+
+        act_pred_x = torch.argmax(x[:, -(feature_gt_action.size()[1] + 1):-1, :], dim=2).view(-1)
+        act_pred_y = torch.argmax(feature_gt_action, dim=2).view(-1)
+        metric = (act_pred_x == act_pred_y).float().sum().item()
+        return loss, metric, x
+
+    def reason(self, obs, question=None, sent='pos', fewshot=False):
+        batch_size = 1
+        _, \
+        _, \
+        llm_projected_features, oracle_answer = self.preprocess_raw_game(obs)
+
+        feature_game_prompt = self.preprocess_question_test(question=question,
+                                                            fewshot=fewshot,
+                                                            sent=sent,
+                                                            oracle_answer=oracle_answer)
+        inp_tokens = torch.cat(
+            [self.trainable_game_mode_token.repeat(batch_size, 1, 1),
+             llm_projected_features.unsqueeze(1),
+             feature_game_prompt.repeat(batch_size, 1, 1)], dim=1)
+        response_logits = []
+        for i in range(3):
+            out_logits = self.lm(inputs_embeds=inp_tokens).logits
+            next_token = torch.argmax(out_logits[:, -1, :], -1)
+            response_logits.append(next_token)
+            inp_tokens = torch.cat([inp_tokens, self.lm.model.decoder.embed_tokens(next_token).unsqueeze(1)], dim=1)
+        return response_logits, oracle_answer
 
 
 ###############
@@ -298,37 +316,44 @@ def play(model, env_name='PongNoFrameskip-v4', sent='pos', render=True, fewshot=
     with torch.no_grad():
         obs = env.reset()
         episodic_reward = []
-        dones = [True] * len(obs)
         while True:
-            logits, _, _ = model.reason(obs, question=None, use_oracle=True, sent=sent)
+            logits, _ = model.reason(obs, question=None, sent=sent, fewshot=fewshot)
             actions = model.translate_logits_to_button(logits)
             obs, rewards, dones, info = env.step(actions)
             episodic_reward.append(rewards)
             if render:
                 env.render()
             ##############
-            if not all(dones):
+            if not dones:
                 pass
             else:
-                print(np.stack(episodic_reward).mean())
+                print(np.stack(episodic_reward).sum())
                 break
     return
 
 
-def align(epochs=10,
-          expert_steps=500_000,
+def align(epochs=100,
+          expert_steps=1000,
           llm='facebook/opt-125m',
           grad_clip=1,
           accum_steps=2,
           path=None,
           batch_size=128,
           randomized_actions=0.05,
-          inverse_prompt=0.5):
+          inverse_prompt=0.5,
+          log_freq=1000,
+          save_freq=5000,
+          n_jobs=1):
     ##################################################################################################################
     env, env_name, extracted_model, extracted_preprocessing = ppo_load_pong()
     lm, h_dim, tokenizer = load_llm(llm)
-    model = SupervisedAligner(rl_model=extracted_model, rl_preprocess=extracted_preprocessing, lm=lm, h_dim=h_dim,
-                              tokenizer=tokenizer, config='LinearProjectFeaturesToInput', normalize_actions=False)
+    model = SupervisedAligner(rl_model=extracted_model,
+                              rl_preprocess=extracted_preprocessing,
+                              lm=lm,
+                              h_dim=h_dim,
+                              tokenizer=tokenizer,
+                              config='LinearProjectFeaturesToInput',
+                              normalize_actions=False)
     if path is not None:
         checkpoint = torch.load(path)
         model.load_state_dict(checkpoint['state_dict'])
@@ -336,7 +361,7 @@ def align(epochs=10,
     ################################################################################################################
     optimizer = torch.optim.AdamW(
         params=[
-            {'params': model.parameters(), 'lr': 0.0005, 'weight_decay': 0.001}
+            {'params': model.parameters(), 'lr': 0.005, 'weight_decay': 0.001}
         ],
         betas=(0.99, 0.95),
         eps=1e-8
@@ -354,55 +379,58 @@ def align(epochs=10,
     train_dataloader = DataLoader(
         MultiModalDS(sources=['Pong'],
                      n_examples=[expert_steps],
-                     n_jobs=[4], args=[{'random_act_prob': randomized_actions}]),
+                     n_jobs=[n_jobs], args=[{'random_act_prob': randomized_actions}]),
         batch_size=batch_size,
-        shuffle=True)
+        shuffle=False)
+    with torch.cuda.amp.autocast(dtype=GLOBAL_DTYPE):
+        for epoch_idx in range(epochs):
+            for step_idx, batch in enumerate(pbar := tqdm(train_dataloader)):
+                real_index = (epoch_idx * len(train_dataloader)) + step_idx
+                _, raw, feats, gt_action_logits = batch
+                if random.uniform(0, 1) < inverse_prompt:
+                    use_neg_prompt = True
+                else:
+                    use_neg_prompt = False
+                loss, metric, _ = model(feats=feats, actions=gt_action_logits, use_negative_prompt=use_neg_prompt)
+                pbar.set_postfix({'Epoch': epoch_idx, 'Step': real_index, 'Loss': loss.item(), 'Accuracy': metric})
+                loss = loss / accum_steps
+                scaler.scale(loss).backward()
+                if (real_index + 1) % accum_steps == 0:
+                    if grad_clip > 0:
+                        scaler.unscale_(optimizer)
+                        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
 
-    for step_idx in tqdm(range(epochs * expert_steps)):
-        _, raw, feats, gt_action_logits = next(iter(train_dataloader))
-
-        if random.uniform(0, 1) < inverse_prompt:
-            use_negative_prompt = True
-        else:
-            use_negative_prompt = False
-        _, loss, actions = model(obs, use_negative_prompt=use_negative_prompt)
-        obs, rewards, dones, info = env.step(actions)
-        loss = loss / accum_steps
-        scaler.scale(loss).backward()
-        if (step_idx + 1) % accum_steps == 0:
-            if grad_clip > 0:
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-
-        if step_idx % 20_000 == 19_999:
-            print(f"\nLoss @ step {step_idx}: {loss.item()}\n")
-            print("\nPositive Score:")
-            play(model, env_name, sent='pos', render=False)
-            print("\nNegative Score:")
-            play(model, env_name, sent='neg', render=False)
-            print("\nFewshot positive:")
-            play(model, env_name, sent='pos', render=False, fewshot=True)
-            print("\nFewshot negative:")
-            play(model, env_name, sent='neg', render=False, fewshot=True)
-            obs = env.reset()
-        if step_idx % 50_000 == 49_999:
-            save_checkpoint({
-                'state_dict': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-            },
-                f'./model_runs/step_{step_idx}_neg_{inverse_prompt}_rand_{randomized_actions}_bs_{batch_size}_as_{accum_steps}')
-
-    # env.render()
+                if real_index % log_freq == log_freq - 1:
+                    print(f"\nLoss @ step {real_index}: {loss.item()} Metric @ step: {metric}")
+                    if metric > 0.5:
+                        print("\nPositive Score:")
+                        play(model, env_name, sent='pos', render=False)
+                        print("\nNegative Score:")
+                        play(model, env_name, sent='neg', render=False)
+                        print("\nFewshot positive:")
+                        play(model, env_name, sent='pos', render=False, fewshot=True)
+                        print("\nFewshot negative:")
+                        play(model, env_name, sent='neg', render=False, fewshot=True)
+                if real_index % save_freq == save_freq - 1:
+                    save_checkpoint({
+                        'state_dict': model.get_state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                    },
+                        f'./model_runs/step_{real_index}_neg_{inverse_prompt}_rand_{randomized_actions}_bs_{batch_size}_as_{accum_steps}')
 
 
-def test_align(model=None, path=None):
+def test_align(path=None, sent='pos', fewshot=False):
     env, extracted_model, extracted_preprocessing = ppo_load_pong()
     lm, h_dim, tokenizer = load_llm()
-    model = SupervisedAligner(rl_model=extracted_model, rl_preprocess=extracted_preprocessing, lm=lm, h_dim=h_dim,
-                              tokenizer=tokenizer, config='LinearProjectFeaturesToInput', normalize_actions=False)
+    model = SupervisedAligner(rl_model=extracted_model,
+                              rl_preprocess=extracted_preprocessing,
+                              lm=lm, h_dim=h_dim,
+                              tokenizer=tokenizer,
+                              config='LinearProjectFeaturesToInput',
+                              normalize_actions=False)
     checkpoint = torch.load(path)
     model.load_state_dict(checkpoint['state_dict'])
     model.cuda()
@@ -416,8 +444,8 @@ def test_align(model=None, path=None):
         if question == 'None':
             question = None
         while True:
-            logits, loss, oracle_answer = model.reason(obs, question=question, use_oracle=True, sent='pos')
-            actions = model.translate_logits_to_button(logits)
+            response_logits, oracle_answer = model.reason(obs, question=question, sent=sent, fewshot=fewshot)
+            actions = model.translate_logits_to_button(response_logits)
             # print(f"Action: {actions[0]} / Oracle Action: {oracle_answer}")
             if actions[0] != oracle_answer:
                 mismatchs.append((actions[0], oracle_answer))
@@ -431,8 +459,6 @@ def test_align(model=None, path=None):
                 print("Episodic Reward")
                 print(sum(episodic_reward))
                 episodic_reward = []
-
-            # print(mismatchs)
 
 
 if __name__ == '__main__':

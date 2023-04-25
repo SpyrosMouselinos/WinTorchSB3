@@ -154,7 +154,7 @@ class MultiModalDS(Dataset):
         return self.total_examples
 
     def __getitem__(self, idx):
-        return self.blob_ids[idx], self.blob_raw_features[idx].float(), self.blob_expert_features[idx].float(), \
+        return self.blob_ids[idx], self.blob_raw_features[idx], self.blob_expert_features[idx], \
                self.blob_expert_responses[idx]
 
 
