@@ -366,7 +366,7 @@ def align(epochs=100,
     save_checkpoint({
         'state_dict': model.state_dict(),
         'optimizer': optimizer.state_dict(),
-    }, './model_runs/zero_step')
+    }, '../model_runs/zero_step')
 
     train_dataloader = DataLoader(
         MultiModalDS(sources=['Pong'],
@@ -411,12 +411,12 @@ def align(epochs=100,
                         'state_dict': model.get_state_dict(),
                         'optimizer': optimizer.state_dict(),
                     },
-                        f'./model_runs/step_{real_index}_neg_{inverse_prompt}_rand_{randomized_actions}_bs_{batch_size}_as_{accum_steps}')
+                        f'../model_runs/step_{real_index}_neg_{inverse_prompt}_rand_{randomized_actions}_bs_{batch_size}_as_{accum_steps}')
             # Save At End of Epoch #
             save_checkpoint({
                 'state_dict': model.get_state_dict(),
                 'optimizer': optimizer.state_dict(),
-                },f'./model_runs/step_{real_index}_neg_{inverse_prompt}_rand_{randomized_actions}_bs_{batch_size}_as_{accum_steps}')
+                },f'../model_runs/step_{real_index}_neg_{inverse_prompt}_rand_{randomized_actions}_bs_{batch_size}_as_{accum_steps}')
 
 
 def test_align(path=None, sent='pos', fewshot=False):
