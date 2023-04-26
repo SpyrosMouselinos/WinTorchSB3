@@ -101,7 +101,7 @@ class SupervisedAligner(nn.Module):
             return f'You are an agent that plays the game of {game}. The best move is {oracle_token}. What is a bad move? '
         elif sent == 'pos':
             if game == 'Pong':
-                oracle_token = str(random.choice(list({0, 1, 2, 3, 4, 5}.difference(set([oracle_guess])))))
+                oracle_token = str(random.choice(list({0, 1, 2, 3, 4, 5}.difference(set(oracle_guess)))))
             return f'You are an agent that plays the game of {game}. A bad move is {oracle_token}. What is a good move? '
         else:
             raise NotImplementedError
@@ -209,6 +209,7 @@ class SupervisedAligner(nn.Module):
         if question is None:
             if fewshot:
                 question = self.initialize_fewshot_prompt(oracle_guess=oracle_answer, sent=sent)
+                question = self.tokenizer(question, add_special_tokens=True)['input_ids']
             else:
                 if sent == 'pos':
                     question = self.TOKENIZED_VAL_POS_PROMPT['input_ids']
@@ -468,14 +469,14 @@ if __name__ == '__main__':
     parser.add_argument('-algo', default='ppo')
     parser.add_argument('-llm', default='facebook/opt-125m')
     parser.add_argument('-model_dir', default='downloads/ppo/PongNoFrameskip-v4_1/PongNoFrameskip-v4.zip')
-    parser.add_argument('-path', default=None)
-    parser.add_argument('-mode', default='train')
+    parser.add_argument('-path', default='../model_runs/step_99999_rand_50.pth.tar')
+    parser.add_argument('-mode', default='test')
     parser.add_argument('-test_sent', default='pos')
-    parser.add_argument('-test_fewshot', default='0')
+    parser.add_argument('-test_fewshot', default='1')
     args = parser.parse_args()
     if args.mode == 'train':
         align(path=args.path, llm=args.llm)
     else:
-        test_align(path=args.path,llm=args.llm, sent=args.test_sent, fewshot=True if args.test_fewshot == '1' else False)
+        test_align(path=args.path, llm=args.llm, sent=args.test_sent, fewshot=True if args.test_fewshot == '1' else False)
     #align()
     #test_align(path='../model_runs/step_1599_neg_0.5_rand_0.05_bs_256_as_1.pth.tar')
