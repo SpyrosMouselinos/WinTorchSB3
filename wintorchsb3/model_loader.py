@@ -253,7 +253,7 @@ class SupervisedAligner(nn.Module):
 
         act_pred_x = torch.argmax(x[:, -(feature_gt_action.size()[1] + 1):-1, :], dim=2).view(-1)
         act_pred_y = target_tokens[:,-feature_gt_action.size()[1]:].view(-1)
-        metric = 100 * ((act_pred_x == act_pred_y).float().sum().item() / batch_size)
+        metric = (act_pred_x == act_pred_y).float().sum().item() / batch_size
         return loss, metric, x
 
     def reason(self, obs, question=None, sent='pos', fewshot=False):
