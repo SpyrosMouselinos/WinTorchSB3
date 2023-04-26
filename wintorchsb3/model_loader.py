@@ -252,8 +252,8 @@ class SupervisedAligner(nn.Module):
         loss = loss_fct(shift_logits.view(-1, x.size()[-1]), shift_labels.view(-1))
 
         act_pred_x = torch.argmax(x[:, -(feature_gt_action.size()[1] + 1):-1, :], dim=2).view(-1)
-        act_pred_y = torch.argmax(feature_gt_action, dim=2).view(-1)
-        metric = (act_pred_x == act_pred_y).float().sum().item()
+        act_pred_y = target_tokens[:,-feature_gt_action.size()[1]:].view(-1)
+        metric = 100 * ((act_pred_x == act_pred_y).float().sum().item() / batch_size)
         return loss, metric, x
 
     def reason(self, obs, question=None, sent='pos', fewshot=False):
@@ -328,17 +328,17 @@ def play(model, env_name='PongNoFrameskip-v4', sent='pos', render=True, fewshot=
 
 
 def align(epochs=100,
-          expert_steps=1_000,
-          llm='facebook/opt-6.7b',
+          expert_steps=100,
+          llm='facebook/opt-125m',
           grad_clip=1,
-          accum_steps=16,
+          accum_steps=1,
           path=None,
-          batch_size=4,
+          batch_size=2,
           randomized_actions=0.05,
-          inverse_prompt=0.5,
+          inverse_prompt=0.0,
           log_freq=1000,
           save_freq=5000,
-          n_jobs=4):
+          n_jobs=1):
     ##################################################################################################################
     env, env_name, extracted_model, extracted_preprocessing = ppo_load_pong()
     lm, h_dim, tokenizer = load_llm(llm)
@@ -470,9 +470,9 @@ if __name__ == '__main__':
     parser.add_argument('-llm', default='facebook/opt-125m')
     parser.add_argument('-model_dir', default='downloads/ppo/PongNoFrameskip-v4_1/PongNoFrameskip-v4.zip')
     parser.add_argument('-path', default='../model_runs/step_99999_rand_50.pth.tar')
-    parser.add_argument('-mode', default='test')
+    parser.add_argument('-mode', default='train')
     parser.add_argument('-test_sent', default='pos')
-    parser.add_argument('-test_fewshot', default='1')
+    parser.add_argument('-test_fewshot', default='0')
     args = parser.parse_args()
     if args.mode == 'train':
         align(path=args.path, llm=args.llm)
