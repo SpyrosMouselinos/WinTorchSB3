@@ -17,8 +17,8 @@ from expert_trace_extract import ExtractedModelPolicy, ppo_load_pong, MultiModal
 
 # os.chdir('/'.join(os.path.dirname(__file__).split('/')[:-1]))
 CURRENT_DIR = os.getcwd()
-GLOBAL_DTYPE = torch.float32
-fp = 32
+GLOBAL_DTYPE = torch.bfloat16
+fp = 'b16'
 
 
 def save_checkpoint(state, filename='checkpoint'):
@@ -482,7 +482,7 @@ if __name__ == '__main__':
     parser.add_argument('-test_fewshot', default='0')
     parser.add_argument('-bs', default=256)
     parser.add_argument('-acs', default=1)
-    parser.add_argument('-caption_loss', default=1)
+    parser.add_argument('-caption_loss', default=0)
     args = parser.parse_args()
     if args.mode == 'train':
         align(path=args.path, llm=args.llm, batch_size=args.bs, accum_steps=args.acs, caption_loss=args.caption_loss)
