@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 from expert_trace_extract import ExtractedModelPolicy, ppo_load_pong, MultiModalDS
 
-#os.chdir('/'.join(os.path.dirname(__file__).split('/')[:-1]))
+# os.chdir('/'.join(os.path.dirname(__file__).split('/')[:-1]))
 CURRENT_DIR = os.getcwd()
 GLOBAL_DTYPE = torch.float32
 fp = 32
@@ -26,7 +26,7 @@ def save_checkpoint(state, filename='checkpoint'):
 
 
 class SupervisedAligner(nn.Module):
-    def __init__(self, rl_model, rl_preprocess, lm, h_dim, tokenizer, config, normalize_actions):
+    def __init__(self, rl_model, rl_preprocess, lm, h_dim, tokenizer, config, normalize_actions, caption_loss=0):
         super().__init__()
         self.rl_model = rl_model
         self.rl_preprocess = rl_preprocess
@@ -39,6 +39,7 @@ class SupervisedAligner(nn.Module):
         self.initialize_commands()
         self.initialize_game_prompt()
         self.normalize_actions = normalize_actions
+        self.caption_loss = caption_loss
 
     def get_state_dict(self, efficient=True):
         if not efficient:
@@ -247,12 +248,17 @@ class SupervisedAligner(nn.Module):
         x = out_logits
         y = target_tokens
         loss_fct = CrossEntropyLoss()
-        shift_logits = x[..., 1:-1, :].contiguous()
-        shift_labels = y.contiguous()
+        if self.caption_loss == 1:
+            shift_logits = x[..., 1:-1, :].contiguous()
+            shift_labels = y.contiguous()
+        else:
+            shift_logits = x[..., -(feature_gt_action.size()[1] + 1):-1, :].contiguous()
+            shift_labels = y[:, -feature_gt_action.size()[1]:].contiguous()
+
         loss = loss_fct(shift_logits.view(-1, x.size()[-1]), shift_labels.view(-1))
 
         act_pred_x = torch.argmax(x[:, -(feature_gt_action.size()[1] + 1):-1, :], dim=2).view(-1)
-        act_pred_y = target_tokens[:,-feature_gt_action.size()[1]:].view(-1)
+        act_pred_y = y[:, -feature_gt_action.size()[1]:].view(-1)
         metric = (act_pred_x == act_pred_y).float().sum().item() / batch_size
         return loss, metric, x
 
@@ -328,7 +334,7 @@ def play(model, env_name='PongNoFrameskip-v4', sent='pos', render=True, fewshot=
 
 
 def align(epochs=100,
-          expert_steps=1_000,
+          expert_steps=10_000,
           llm='facebook/opt-125m',
           grad_clip=1,
           accum_steps=1,
@@ -338,7 +344,8 @@ def align(epochs=100,
           inverse_prompt=0.0,
           log_freq=1000,
           save_freq=5000,
-          n_jobs=4):
+          caption_loss=0,
+          n_jobs=1):
     ##################################################################################################################
     env, env_name, extracted_model, extracted_preprocessing = ppo_load_pong()
     lm, h_dim, tokenizer = load_llm(llm)
@@ -349,7 +356,7 @@ def align(epochs=100,
                               h_dim=h_dim,
                               tokenizer=tokenizer,
                               config='LinearProjectFeaturesToInput',
-                              normalize_actions=False)
+                              normalize_actions=False, caption_loss=caption_loss)
     if path is not None:
         checkpoint = torch.load(path)
         model.load_state_dict(checkpoint['state_dict'])
@@ -420,7 +427,7 @@ def align(epochs=100,
         save_checkpoint({
             'state_dict': model.get_state_dict(),
             'optimizer': optimizer.state_dict(),
-            },f'../model_runs/step_{real_index}_llm_{llms}')
+        }, f'../model_runs/step_{real_index}_llm_{llms}')
 
 
 def test_align(path=None, sent='default', fewshot=False, fixed_question=None, llm=None):
@@ -445,7 +452,7 @@ def test_align(path=None, sent='default', fewshot=False, fixed_question=None, ll
         if question == 'None':
             question = None
         while count < 10:
-            #print("Looping...\n", flush=True)
+            # print("Looping...\n", flush=True)
             response_logits, oracle_answer = model.reason(obs, question=question, sent=sent, fewshot=fewshot)
             actions = model.translate_logits_to_button(response_logits)
             # print(f"Action: {actions[0]} / Oracle Action: {oracle_answer}")
@@ -453,13 +460,13 @@ def test_align(path=None, sent='default', fewshot=False, fixed_question=None, ll
                 mismatchs.append((actions[0], oracle_answer))
             obs, rewards, dones, info = env.step(actions)
             episodic_reward.append(rewards)
-            #env.render()
+            # env.render()
             ##############
             if not dones:
                 pass
             else:
                 print("Episodic Reward", flush=True)
-                print(sum(episodic_reward),flush=True)
+                print(sum(episodic_reward), flush=True)
                 episodic_reward = []
                 count += 1
 
@@ -479,5 +486,5 @@ if __name__ == '__main__':
     if args.mode == 'train':
         align(path=args.path, llm=args.llm, batch_size=args.bs, accum_steps=args.acs)
     else:
-        test_align(path=args.path, llm=args.llm, sent=args.test_sent, fewshot=True if args.test_fewshot == '1' else False)
-
+        test_align(path=args.path, llm=args.llm, sent=args.test_sent,
+                   fewshot=True if args.test_fewshot == '1' else False)
