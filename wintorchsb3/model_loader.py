@@ -17,8 +17,8 @@ from expert_trace_extract import ExtractedModelPolicy, ppo_load_pong, MultiModal
 
 # os.chdir('/'.join(os.path.dirname(__file__).split('/')[:-1]))
 CURRENT_DIR = os.getcwd()
-GLOBAL_DTYPE = torch.bfloat16
-fp = 'b16'
+GLOBAL_DTYPE = torch.float32
+#fp = 'b16'
 
 
 def save_checkpoint(state, filename='checkpoint'):
@@ -333,7 +333,8 @@ def play(model, env_name='PongNoFrameskip-v4', sent='pos', render=True, fewshot=
     return
 
 
-def align(epochs=100,
+def align(run_name='latest',
+          epochs=100,
           expert_steps=10_000,
           llm='facebook/opt-125m',
           grad_clip=1,
@@ -422,12 +423,12 @@ def align(epochs=100,
                         'state_dict': model.get_state_dict(),
                         'optimizer': optimizer.state_dict(),
                     },
-                        f'../model_runs/step_{real_index}_llm_{llms}')
+                        f'../model_runs/{run_name}_step_{real_index}_llm_{llms}')
         # Save At End of Final Epoch #
         save_checkpoint({
             'state_dict': model.get_state_dict(),
             'optimizer': optimizer.state_dict(),
-        }, f'../model_runs/step_{real_index}_llm_{llms}')
+        }, f'../model_runs/{run_name}_step_{real_index}_llm_{llms}')
 
 
 def test_align(path=None, sent='default', fewshot=False, fixed_question=None, llm=None):
@@ -480,12 +481,13 @@ if __name__ == '__main__':
     parser.add_argument('-mode', default='train')
     parser.add_argument('-test_sent', default='pos')
     parser.add_argument('-test_fewshot', default='0')
-    parser.add_argument('-bs', default=256)
-    parser.add_argument('-acs', default=1)
-    parser.add_argument('-caption_loss', default=0)
+    parser.add_argument('-bs', default=256, type=int)
+    parser.add_argument('-acs', default=1 , type=int)
+    parser.add_argument('-caption_loss', default=0, type=int)
+    parser.add_argument('-run_name', default=None)
     args = parser.parse_args()
     if args.mode == 'train':
-        align(path=args.path, llm=args.llm, batch_size=args.bs, accum_steps=args.acs, caption_loss=args.caption_loss)
+        align(run_name=args.run_name, path=args.path, llm=args.llm, batch_size=args.bs, accum_steps=args.acs, caption_loss=args.caption_loss)
     else:
         test_align(path=args.path, llm=args.llm, sent=args.test_sent,
                    fewshot=True if args.test_fewshot == '1' else False)
