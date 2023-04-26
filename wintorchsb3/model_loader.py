@@ -328,17 +328,17 @@ def play(model, env_name='PongNoFrameskip-v4', sent='pos', render=True, fewshot=
 
 
 def align(epochs=100,
-          expert_steps=100,
+          expert_steps=1_000,
           llm='facebook/opt-125m',
           grad_clip=1,
           accum_steps=1,
           path=None,
-          batch_size=2,
+          batch_size=256,
           randomized_actions=0.05,
           inverse_prompt=0.0,
           log_freq=1000,
           save_freq=5000,
-          n_jobs=1):
+          n_jobs=4):
     ##################################################################################################################
     env, env_name, extracted_model, extracted_preprocessing = ppo_load_pong()
     lm, h_dim, tokenizer = load_llm(llm)
@@ -357,7 +357,7 @@ def align(epochs=100,
     ################################################################################################################
     optimizer = torch.optim.AdamW(
         params=[
-            {'params': model.parameters(), 'lr': 0.005, 'weight_decay': 0.001}
+            {'params': model.parameters(), 'lr': 0.0005, 'weight_decay': 0.001}
         ],
         betas=(0.99, 0.95),
         eps=1e-8
@@ -415,12 +415,12 @@ def align(epochs=100,
                         'state_dict': model.get_state_dict(),
                         'optimizer': optimizer.state_dict(),
                     },
-                        f'../model_runs/step_{real_index}_neg_{inverse_prompt}_rand_{randomized_actions}_bs_{batch_size}_as_{accum_steps}_llm_{llms}')
+                        f'../model_runs/step_{real_index}_llm_{llms}')
         # Save At End of Final Epoch #
         save_checkpoint({
             'state_dict': model.get_state_dict(),
             'optimizer': optimizer.state_dict(),
-            },f'../model_runs/step_{real_index}_neg_{inverse_prompt}_rand_{randomized_actions}_bs_{batch_size}_as_{accum_steps}_llm_{llms}')
+            },f'../model_runs/step_{real_index}_llm_{llms}')
 
 
 def test_align(path=None, sent='default', fewshot=False, fixed_question=None, llm=None):
@@ -469,14 +469,15 @@ if __name__ == '__main__':
     parser.add_argument('-algo', default='ppo')
     parser.add_argument('-llm', default='facebook/opt-125m')
     parser.add_argument('-model_dir', default='downloads/ppo/PongNoFrameskip-v4_1/PongNoFrameskip-v4.zip')
-    parser.add_argument('-path', default='../model_runs/step_99999_rand_50.pth.tar')
+    parser.add_argument('-path', default=None)
     parser.add_argument('-mode', default='train')
     parser.add_argument('-test_sent', default='pos')
     parser.add_argument('-test_fewshot', default='0')
+    parser.add_argument('-bs', default=256)
+    parser.add_argument('-acs', default=1)
     args = parser.parse_args()
     if args.mode == 'train':
-        align(path=args.path, llm=args.llm)
+        align(path=args.path, llm=args.llm, batch_size=args.bs, accum_steps=args.acs)
     else:
         test_align(path=args.path, llm=args.llm, sent=args.test_sent, fewshot=True if args.test_fewshot == '1' else False)
-    #align()
-    #test_align(path='../model_runs/step_1599_neg_0.5_rand_0.05_bs_256_as_1.pth.tar')
+
