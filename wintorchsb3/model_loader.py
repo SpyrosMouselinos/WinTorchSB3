@@ -482,9 +482,10 @@ if __name__ == '__main__':
     parser.add_argument('-test_fewshot', default='0')
     parser.add_argument('-bs', default=256)
     parser.add_argument('-acs', default=1)
+    parser.add_argument('-caption_loss', default=1)
     args = parser.parse_args()
     if args.mode == 'train':
-        align(path=args.path, llm=args.llm, batch_size=args.bs, accum_steps=args.acs)
+        align(path=args.path, llm=args.llm, batch_size=args.bs, accum_steps=args.acs, caption_loss=args.caption_loss)
     else:
         test_align(path=args.path, llm=args.llm, sent=args.test_sent,
                    fewshot=True if args.test_fewshot == '1' else False)
