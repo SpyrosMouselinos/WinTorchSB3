@@ -9,7 +9,7 @@ import numpy as np
 import torch.nn as nn
 import torch
 from torch.utils.data import Dataset
-
+import os
 from tqdm import tqdm
 
 
@@ -109,22 +109,26 @@ def ppo_load(game):
         return ppo_load_breakout()
 
 
-def extract_expert_trace(game='Pong', n_examples=2048, n_jobs=1, random_act_prob=0.05):
+def maybe_extract_trace(game, random_act_prob=0.01):
     if game == 'Pong':
-        env, _, extracted_model, extracted_preprocessing, buttons = ppo_load_pong(n_jobs)
+        expected_score = 15
+        env, _, extracted_model, extracted_preprocessing, buttons = ppo_load_pong(1)
     elif game == 'Breakout':
-        env, _, extracted_model, extracted_preprocessing, buttons = ppo_load_breakout(n_jobs)
+        expected_score = 80
+        env, _, extracted_model, extracted_preprocessing, buttons = ppo_load_breakout(1)
     else:
         raise NotImplementedError
     observations = []
     img_features = []
     actions_probs = []
     obs = env.reset()
-    for _ in tqdm(range(n_examples)):
+    sum_rewards = 0
+    n_examples = 0
+    while True:
         observation = extracted_preprocessing(obs)
         with torch.no_grad():
             feats, actions = extracted_model.predict(observation)
-        action = actions.cpu().numpy().reshape((n_jobs, buttons))
+        action = actions.cpu().numpy().reshape((1, buttons))
         action_pos = action.argmax(-1)
         for o in obs:
             observations.append(o)
@@ -132,26 +136,52 @@ def extract_expert_trace(game='Pong', n_examples=2048, n_jobs=1, random_act_prob
             img_features.append(f)
         for a in action:
             actions_probs.append(a)
-        for i in range(n_jobs):
-            if random.uniform(0, 1) < random_act_prob:
-                action_pos[i] = env.action_space.sample()
-            obs, rewards, done, info = env.step(action_pos)
+        if random.uniform(0, 1) < random_act_prob:
+            action_pos = [env.action_space.sample()]
+        obs, rewards, done, info = env.step(action_pos)
+        sum_rewards += rewards[0]
+        n_examples += 1
+        if done[0] or (not done[0] and n_examples > 3_000):
+            if sum_rewards >= expected_score:
+                return observations, img_features, actions_probs, buttons, n_examples
+            else:
+                n_examples = 0
+                sum_rewards = 0
+                obs = env.reset()
+
+
+def extract_expert_trace(game='Pong', n_games=20, random_act_prob=0.01):
+    valid_games = 0
+    observations = []
+    img_features = []
+    actions_probs = []
+    while valid_games < n_games:
+        observations_, img_features_, actions_probs_, buttons, examples = maybe_extract_trace(game=game,
+                                                                                              random_act_prob=random_act_prob)
+        for f in observations_:
+            observations.append(f)
+        for f in img_features_:
+            img_features.append(f)
+        for f in actions_probs_:
+            actions_probs.append(f)
+
+        valid_games += 1
     return game, observations, img_features, actions_probs, buttons
 
 
 class MultiModalDS(Dataset):
-    def __init__(self, sources, n_examples, n_jobs, args):
+    def __init__(self, sources, n_games, args):
         self.GAMES = ['Pong', 'Breakout']
         self.IMAGES = ['Cifar100']
         self.SOUNDS = ['Random']
         self.sources = sources
-        self.n_examples = n_examples
-        self.n_jobs = n_jobs
+        self.n_games = n_games
         self.args = args
         self.repack_blobs(self.prepare_sources())
 
+
     def prepare_game(self, game, source_id):
-        blob = extract_expert_trace(game=game, n_examples=self.n_examples[source_id], n_jobs=self.n_jobs[source_id],
+        blob = extract_expert_trace(game=game, n_games=self.n_games[source_id],
                                     random_act_prob=self.args[source_id]['random_act_prob'])
         return blob
 
@@ -191,6 +221,11 @@ class MultiModalDS(Dataset):
         self.blob_expert_features = blob_expert_features
         self.blob_expert_responses = blob_expert_responses
         self.max_buttons = max_buttons
+
+    # def maybe_execute(self):
+    #     if os.path.exists('prepacked_ng_{}_rnd_{}.pkl'):
+    #         pass
+
 
     def __len__(self):
         return self.total_examples
@@ -241,7 +276,6 @@ def test_breakout():
 
         # from torch.utils.data import DataLoader
 
-
 #
 # train_dataloader = DataLoader(
 #     MultiModalDS(sources=['Pong', 'Breakout'], n_examples=[4, 4], n_jobs=[1, 1],
@@ -254,4 +288,3 @@ def test_breakout():
 # for batch in train_dataloader:
 #     print('hey')
 #     print('hoi')
-
