@@ -19,7 +19,7 @@ from expert_trace_extract import ExtractedModelPolicy, ppo_load_pong, MultiModal
 
 # os.chdir('/'.join(os.path.dirname(__file__).split('/')[:-1]))
 CURRENT_DIR = os.getcwd()
-GLOBAL_DTYPE = torch.bfloat16
+GLOBAL_DTYPE = torch.float32
 
 
 # fp = 'b16'
@@ -421,8 +421,8 @@ def play(model, game='Pong', sent='pos', render=True, fewshot=False):
 
 
 def align(run_name='latest',
-          epochs=200,
-          n_games=1,
+          epochs=500,
+          n_games=5,
           llm='facebook/opt-125m',
           grad_clip=1,
           accum_steps=1,
@@ -430,8 +430,8 @@ def align(run_name='latest',
           batch_size=64,
           randomized_actions=0.01,
           inverse_prompt=0.25,
-          log_freq=500,
-          save_freq=5000,
+          log_freq=1_00,
+          save_freq=2_000,
           caption_loss=0, games=['Breakout', 'Pong']):
     ##################################################################################################################
     lm, h_dim, tokenizer = load_llm(llm)
