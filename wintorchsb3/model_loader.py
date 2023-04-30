@@ -134,17 +134,21 @@ class SupervisedAligner(nn.Module):
     def get_prompt(self, game, sent='pos', seed=0):
         pos_template_list = [
             'This is a frame from the game of xxx. You are an agent playing the game. What would be a good move to play? ',
+            'This is a frame from the game of xxx. You are an agent playing the game. What would be a not bad move to play? ',
             'You are playing the game of xxx. What would be your next move if you wanted to win? ',
             'As a xxx player, you are presented with this game frame. What would you do to win? ',
             'You are a xxx player and your opponent has just attacked you. What move do you make to win? ',
             'Imagine you are playing xxx. What action would you take to successfully respond to your opponent? '
+            'Imagine you are playing xxx. What action would be optimal? '
         ]
         neg_template_list = [
             'This is a frame from the game of xxx. You are an agent playing the game. What would be a bad move to play? ',
             'As a xxx player, what would be the worst move you could make when trying to respond to your opponent? ',
-            'You are an agent playing the game of xxx. What would be a bad move to play if you want to win the game? ',
+            'You are playing the game of xxx. What would be your next move if you wanted to lose? ',
+            'You are an agent playing the game of xxx. What would be a not good move to play if you want to win the game? ',
             'In this game of xxx, what is the biggest mistake a player can make when trying to score points? ',
             'Imagine you are playing xxx. What action would be a bad response to your opponent? '
+            'Imagine you are playing xxx. What action would be a not optimal response to your opponent? '
         ]
         list_ = pos_template_list if sent == 'pos' else neg_template_list
         prompt = list_[seed]
@@ -292,7 +296,7 @@ class SupervisedAligner(nn.Module):
                                   tokenized_ngt_action):
 
         if not use_negative_prompt:
-            seed = random.choice([0, 1, 2, 3, 4])
+            seed = random.choice([0, 1, 2, 3, 4, 5, 6])
             prompt = [self.get_prompt(game=f, sent='pos', seed=seed) for f in games]
             tok_prompt = [self.tokenizer(f, add_special_tokens=True)['input_ids'] for f in prompt]
             max_pad_length = max(len(i) for i in tok_prompt) + 1
@@ -306,7 +310,7 @@ class SupervisedAligner(nn.Module):
             feature_game_prompt = self.lm.model.decoder.embed_tokens(target_tokens)
 
         else:
-            seed = random.choice([0, 1, 2, 3, 4])
+            seed = random.choice([0, 1, 2, 3, 4, 5, 6])
             prompt = [self.get_prompt(game=f, sent='neg', seed=seed) for f in games]
             tok_prompt = [self.tokenizer(f, add_special_tokens=True)['input_ids'] for f in prompt]
             max_pad_length = max(len(i) for i in tok_prompt) + 1
@@ -425,7 +429,7 @@ def load_llm(opt_version='facebook/opt-125m'):
         def forward(self, x): return super().forward(x).to(torch.float32)
 
     lm.lm_head = CastOutputToFloat(lm.lm_head)
-    lm.gradient_checkpointing_enable()
+    #lm.gradient_checkpointing_enable()
     return lm, h_dim, tokenizer
 
 
@@ -535,7 +539,7 @@ def align(run_name='latest',
                 if real_index % log_freq == log_freq - 1:
 
                     print(f"\nLoss @ step {real_index}: {loss.item()} Metric @ step: {metric}")
-                    if run_epoch_metric / (step_idx + 1) > 0.7:
+                    if run_epoch_metric / (step_idx + 1) > 0.9:
 
                         for game in ['Pong', 'Breakout']:
                             print(f"\nGame: {game} Positive Score:")
