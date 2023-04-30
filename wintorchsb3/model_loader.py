@@ -495,11 +495,6 @@ def align(run_name='latest',
     optimizer.step()
 
     ################################################################################################################
-    save_checkpoint({
-        'state_dict': model.get_state_dict(),
-        'optimizer': optimizer.state_dict(),
-    }, '../model_runs/zero_step')
-
     train_dataloader = DataLoader(
         MultiModalDS(sources=games,
                      n_games=[n_games, n_games],
@@ -556,6 +551,11 @@ def align(run_name='latest',
                         'optimizer': optimizer.state_dict(),
                     },
                         f'../model_runs/{run_name}_step_{real_index}_llm_{llms}')
+                    print("Loading from Last CHKPT...\n")
+                    checkpoint = torch.load(f'../model_runs/{run_name}_step_{real_index}_llm_{llms}.pth.tar')
+                    model.load_state_dict(checkpoint['state_dict'], strict=False)
+
+
         # Save At End of Final Epoch #
         save_checkpoint({
             'state_dict': model.get_state_dict(),
