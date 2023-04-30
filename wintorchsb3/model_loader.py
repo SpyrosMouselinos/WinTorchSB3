@@ -19,10 +19,35 @@ from expert_trace_extract import ExtractedModelPolicy, ppo_load_pong, MultiModal
 
 # os.chdir('/'.join(os.path.dirname(__file__).split('/')[:-1]))
 CURRENT_DIR = os.getcwd()
-GLOBAL_DTYPE = torch.float32
+GLOBAL_DTYPE = torch.bfloat16
 
 
 # fp = 'b16'
+
+def most_frequent(List):
+    return max(set(List), key=List.count)
+
+
+def countFreq(pat, txt):
+    M = len(pat)
+    N = len(txt)
+    res = 0
+
+    # A loop to slide pat[] one by one
+    for i in range(N - M + 1):
+
+        # For current index i, check
+        # for pattern match
+        j = 0
+        while j < M:
+            if (txt[i + j] != pat[j]):
+                break
+            j += 1
+
+        if (j == M):
+            res += 1
+            j = 0
+    return res
 
 
 def save_checkpoint(state, filename='checkpoint'):
@@ -163,7 +188,7 @@ class SupervisedAligner(nn.Module):
                                self.games]
         self.TOKENIZED_VAL_POS_PROMPT = [self.tokenizer(f, add_special_tokens=True)['input_ids'] for f in
                                          self.VAL_POS_PROMPT]
-        self.VAL_NEG_PROMPT = [f'You are an agent that plays {game}. What is a move you should not play? ' for
+        self.VAL_NEG_PROMPT = [f'You are a bad agent that plays {game}. What would you play? ' for
                                game
                                in
                                self.games]
@@ -173,10 +198,10 @@ class SupervisedAligner(nn.Module):
     def initialize_fewshot_prompt(self, game, oracle_guess=None, sent='neg'):
         if sent == 'neg':
             oracle_token = str(oracle_guess)
-            return f'You are an agent that plays {game}. The best move to play is Move: {oracle_token}. What is a bad move? '
+            return f'You are an agent that plays {game}. Playing {oracle_token} would win the game. What would be your worst move? '
         elif sent == 'pos':
             oracle_token = str(random.choice(list({0, 1, 2, 3, 4, 5}.difference(set(oracle_guess)))))
-            return f'You are an agent that plays {game}. A bad move to play is Move: {oracle_token}. What is a good move? '
+            return f'You are an agent that plays {game}. Playing {oracle_token} would not win the game. What is your best move? '
         else:
             raise NotImplementedError
 
@@ -206,7 +231,7 @@ class SupervisedAligner(nn.Module):
         self.trainable_module_names = ['trainable_game_mode_token', 'trainable_projection']
         return
 
-    def translate_logits_to_button(self, responses):
+    def translate_logits_to_button(self, responses, use_majority_vote=False):
         if isinstance(responses, list):
             responses = torch.stack(responses, dim=1)
         best_next_commands = self.tokenizer.batch_decode(responses)
@@ -215,8 +240,14 @@ class SupervisedAligner(nn.Module):
         env_moves = []
         for env_id in range(parallel_envs):
             for command in self.LANG_COMMANDS.keys():
-                if command in ''.join(best_next_commands[env_id]):
+                for _ in range(countFreq(command, ''.join(best_next_commands[env_id]))):
                     env_moves.append(self.LANG_COMMANDS[command])
+            if len(env_moves) == env_id:
+                env_moves.append(0)
+            elif use_majority_vote:
+                env_moves = [most_frequent(env_moves)]
+            else:
+                env_moves = [env_moves[0]]
             if len(env_moves) == env_id:
                 env_moves.append(0)
         return env_moves, best_next_commands
@@ -298,12 +329,13 @@ class SupervisedAligner(nn.Module):
         if question is None:
             if fewshot:
                 question = self.initialize_fewshot_prompt(oracle_guess=oracle_answer, sent=sent, game=game)
-                question = self.tokenizer(question, add_special_tokens=False)['input_ids']
+                question = self.tokenizer(question, add_special_tokens=True)['input_ids']
             else:
                 if sent == 'pos':
                     question = self.TOKENIZED_VAL_POS_PROMPT[0]
                 elif sent == 'neg':
                     question = self.TOKENIZED_VAL_NEG_PROMPT[0]
+
 
         else:
             question = self.tokenizer(question, add_special_tokens=False)['input_ids']
@@ -357,10 +389,11 @@ class SupervisedAligner(nn.Module):
                                                             fewshot=fewshot,
                                                             sent=sent,
                                                             oracle_answer=oracle_answer)
+        fusion_tokens = self.trainable_game_mode_token.repeat(batch_size, 1, 1) + llm_projected_features.unsqueeze(1)
         inp_tokens = torch.cat(
-            [self.trainable_game_mode_token.repeat(batch_size, 1, 1),
-             llm_projected_features.unsqueeze(1),
-             feature_game_prompt], dim=1)
+            [fusion_tokens,
+             feature_game_prompt,
+             ], dim=1)
         response_logits = []
         for i in range(3):
             out_logits = self.lm(inputs_embeds=inp_tokens).logits
@@ -404,7 +437,7 @@ def play(model, game='Pong', sent='pos', render=True, fewshot=False):
         while True:
             logits, _ = model.reason(obs, game, extracted_model, extracted_preprocessing, question=None, sent=sent,
                                      fewshot=fewshot)
-            actions, best_next_commands = model.translate_logits_to_button(logits)
+            actions, best_next_commands = model.translate_logits_to_button(logits, use_majority_vote=True)
             obs, rewards, dones, info = env.step(actions)
             episodic_reward.append(rewards)
             if render:
@@ -422,7 +455,7 @@ def play(model, game='Pong', sent='pos', render=True, fewshot=False):
 
 def align(run_name='latest',
           epochs=500,
-          n_games=5,
+          n_games=1,
           llm='facebook/opt-125m',
           grad_clip=1,
           accum_steps=1,
@@ -448,7 +481,7 @@ def align(run_name='latest',
     ################################################################################################################
     optimizer = torch.optim.AdamW(
         params=[
-            {'params': model.parameters(), 'lr': 0.005, 'weight_decay': 0.001}
+            {'params': model.parameters(), 'lr': 0.001, 'weight_decay': 0.001}
         ],
         betas=(0.99, 0.95),
         eps=1e-8
@@ -526,7 +559,7 @@ def align(run_name='latest',
         }, f'../model_runs/{run_name}_step_{real_index}_llm_{llms}')
 
 
-def test_align(path=None, sent='default', fewshot=False, fixed_question=None, llm=None, games=['Pong']):
+def test_align(path=None, sent='default', fewshot=False, fixed_question=None, llm=None, record=False, games=['Breakout']):
     lm, h_dim, tokenizer = load_llm(llm)
     model = SupervisedAligner(lm=lm,
                               h_dim=h_dim,
@@ -541,53 +574,58 @@ def test_align(path=None, sent='default', fewshot=False, fixed_question=None, ll
     model.cuda()
     model.eval()
     count = 0
-    for game in games:
-        env, _, extracted_model, extracted_preprocessing, _ = ppo_load(game)
-        env = gym.wrappers.RecordVideo(env, f"./videos/{game}/", step_trigger=lambda x: x % 100 == 0)
-        with torch.no_grad():
-            obs = env.reset()
-            episodic_reward = []
-            mismatchs = []
-            question = fixed_question
-            if question == 'None':
-                question = None
-            while count < 1:
-                # print("Looping...\n", flush=True)
-                response_logits, oracle_answer = model.reason(obs, game,
-                                                              extracted_model,
-                                                              extracted_preprocessing,
-                                                              question=None, sent=sent,
-                                                              fewshot=fewshot)
-                if random.uniform(0, 1) < 0.01:
-                    actions = [env.action_space.sample()]
-                else:
-                    actions = oracle_answer
-                # actions = model.translate_logits_to_button(response_logits)
-                # print(f"Action: {actions[0]} / Oracle Action: {oracle_answer}")
-                obs, rewards, dones, info = env.step(actions)
-                episodic_reward.append(rewards)
-                env.render()
-                ##############
-                if not dones:
-                    pass
-                else:
-                    print(f"Game:{game} Episodic Reward", flush=True)
-                    print(sum(episodic_reward), flush=True)
-                    episodic_reward = []
-                    count += 1
-                    env.close()
+    with torch.cuda.amp.autocast(dtype=GLOBAL_DTYPE):
+        for game in games:
+            env, _, extracted_model, extracted_preprocessing, _ = ppo_load(game)
+            if record:
+                env = gym.wrappers.RecordVideo(env, f"./videos/{game}/", step_trigger=lambda x: x % 100 == 0)
+            with torch.no_grad():
+                obs = env.reset()
+                episodic_reward = []
+                question = fixed_question
+                if question == 'None':
+                    question = None
+                while count < 1:
+                    # print("Looping...\n", flush=True)
+                    response_logits, oracle_answer = model.reason(obs, game,
+                                                                  extracted_model,
+                                                                  extracted_preprocessing,
+                                                                  question=None,
+                                                                  sent=sent,
+                                                                  fewshot=fewshot)
+                    # if random.uniform(0, 1) < 0.01:
+                    #     actions = [env.action_space.sample()]
+                    # else:
+                    #     actions = oracle_answer
+                    actions, deco = model.translate_logits_to_button(response_logits, use_majority_vote=True)
+                    print(f"Action: {actions[0]} / Full Set: {deco} / Oracle Action: {oracle_answer}")
+                    try:
+                        obs, rewards, dones, info = env.step(actions)
+                    except:
+                        obs, rewards, dones, info = env.step([env.action_space.sample()])
+                    episodic_reward.append(rewards)
+                    env.render()
+                    ##############
+                    if not dones:
+                        pass
+                    else:
+                        print(f"Game:{game} Episodic Reward", flush=True)
+                        print(sum(episodic_reward), flush=True)
+                        episodic_reward = []
+                        count += 1
+                        env.close()
 
 
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('-algo', default='ppo')
-    parser.add_argument('-llm', default='facebook/opt-125m')
-    parser.add_argument('-model_dir', default='downloads/ppo/PongNoFrameskip-v4_1/PongNoFrameskip-v4.zip')
-    parser.add_argument('-path', default=None)
-    parser.add_argument('-mode', default='train')
-    parser.add_argument('-test_sent', default='default')
+    parser.add_argument('-llm', default='facebook/opt-1.3b')
+    parser.add_argument('-model_dir', default=None)
+    parser.add_argument('-path', default='../model_runs/l.tar')
+    parser.add_argument('-mode', default='test')
+    parser.add_argument('-test_sent', default='pos')
     parser.add_argument('-test_fewshot', default='0')
-    parser.add_argument('-bs', default=64, type=int)
+    parser.add_argument('-bs', default=1, type=int)
     parser.add_argument('-acs', default=1, type=int)
     parser.add_argument('-caption_loss', default=0, type=int)
     parser.add_argument('-run_name', default='test')
