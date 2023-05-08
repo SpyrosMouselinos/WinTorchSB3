@@ -54,72 +54,11 @@ def save_checkpoint(state, filename='checkpoint'):
     torch.save(state, filename + '.pth.tar')
 
 
-class AsymmetricLossOptimized(nn.Module):
-    ''' Notice - optimized version, minimizes memory allocation and gpu uploading,
-    favors inplace operations'''
-
-    def __init__(self,
-                 gamma_neg=1,
-                 gamma_pos=1,
-                 clip=0.05,
-                 eps=1e-8,
-                 disable_torch_grad_focal_loss=False):
-        super(AsymmetricLossOptimized, self).__init__()
-
-        self.gamma_neg = gamma_neg
-        self.gamma_pos = gamma_pos
-        self.clip = clip
-        self.disable_torch_grad_focal_loss = disable_torch_grad_focal_loss
-        self.eps = eps
-
-        # prevent memory allocation and gpu uploading every iteration, and encourages inplace operations
-        self.targets = self.anti_targets = self.xs_pos = self.xs_neg = self.asymmetric_w = self.loss = None
-
-    def forward(self, x, y):
-        """"
-        Parameters
-        ----------
-        x: input logits
-        y: targets (multi-label binarized vector)
-        """
-
-        self.targets = y
-        self.anti_targets = 1 - y
-
-        # Calculating Probabilities
-        self.xs_pos = torch.sigmoid(x)
-        self.xs_neg = 1.0 - self.xs_pos
-
-        # Asymmetric Clipping
-        if self.clip is not None and self.clip > 0:
-            self.xs_neg.add_(self.clip).clamp_(max=1)
-
-        # Basic CE calculation
-        self.loss = self.targets * torch.log(self.xs_pos.clamp(min=self.eps))
-        self.loss.add_(self.anti_targets * torch.log(self.xs_neg.clamp(min=self.eps)))
-
-        # Asymmetric Focusing
-        if self.gamma_neg > 0 or self.gamma_pos > 0:
-            if self.disable_torch_grad_focal_loss:
-                torch.set_grad_enabled(False)
-            self.xs_pos = self.xs_pos * self.targets
-            self.xs_neg = self.xs_neg * self.anti_targets
-            self.asymmetric_w = torch.pow(1 - self.xs_pos - self.xs_neg,
-                                          self.gamma_pos * self.targets + self.gamma_neg * self.anti_targets)
-            if self.disable_torch_grad_focal_loss:
-                torch.set_grad_enabled(True)
-            self.loss *= self.asymmetric_w
-
-        return -self.loss.sum(-1).mean()
-
-
 class SupervisedAligner(nn.Module):
     def __init__(self, lm, h_dim, tokenizer, config, normalize_actions, caption_loss=0,
                  games=None):
         super().__init__()
         self.games = {k: v for v, k in enumerate(games)}
-        # self.rl_model = rl_model
-        # self.rl_preprocess = rl_preprocess
         self.lm = lm
         self.tokenizer = tokenizer
         self.h_dim = h_dim
@@ -138,7 +77,7 @@ class SupervisedAligner(nn.Module):
             'You are playing the game of xxx. What would be your next move if you wanted to win? ',
             'As a xxx player, you are presented with this game frame. What would you do to win? ',
             'You are a xxx player and your opponent has just attacked you. What move do you make to win? ',
-            'Imagine you are playing xxx. What action would you take to successfully respond to your opponent? '
+            'Imagine you are playing xxx. What action would you take to successfully respond to your opponent? ',
             'Imagine you are playing xxx. What action would be optimal? '
         ]
         neg_template_list = [
@@ -147,7 +86,7 @@ class SupervisedAligner(nn.Module):
             'You are playing the game of xxx. What would be your next move if you wanted to lose? ',
             'You are an agent playing the game of xxx. What would be a not good move to play if you want to win the game? ',
             'In this game of xxx, what is the biggest mistake a player can make when trying to score points? ',
-            'Imagine you are playing xxx. What action would be a bad response to your opponent? '
+            'Imagine you are playing xxx. What action would be a bad response to your opponent? ',
             'Imagine you are playing xxx. What action would be a not optimal response to your opponent? '
         ]
         list_ = pos_template_list if sent == 'pos' else neg_template_list
@@ -188,11 +127,11 @@ class SupervisedAligner(nn.Module):
         # self.PRE_PROMPT = 'Game:'
         # self.TOKENIZED_PRE_PROMPT = self.tokenizer(self.PRE_PROMPT, add_special_tokens=True)['input_ids']
 
-        self.VAL_POS_PROMPT = [f'You are an agent that plays {game}. What is a good move to play? ' for game in
+        self.VAL_POS_PROMPT = [f'You are an agent that plays {game}. What is a good move to play to win? ' for game in
                                self.games]
         self.TOKENIZED_VAL_POS_PROMPT = [self.tokenizer(f, add_special_tokens=True)['input_ids'] for f in
                                          self.VAL_POS_PROMPT]
-        self.VAL_NEG_PROMPT = [f'You are a bad agent that plays {game}. What would you play? ' for
+        self.VAL_NEG_PROMPT = [f'You are an agent that plays {game}. What is a bad move to play? ' for
                                game
                                in
                                self.games]
@@ -228,8 +167,8 @@ class SupervisedAligner(nn.Module):
             self.trainable_projection = nn.Linear(in_features=6, out_features=self.h_dim)
             print(f"Initialized a Trainable Projection Layer from {6} to {self.h_dim} dims\n")
         elif self.config == 'LinearProjectFeaturesToInput':
-            self.trainable_projection = nn.Linear(in_features=512, out_features=self.h_dim)
-            print(f"Initialized a Trainable Projection Layer from {512} to {self.h_dim} dims\n")
+            self.trainable_projection = nn.Linear(in_features=768, out_features=self.h_dim)
+            print(f"Initialized a Trainable Projection Layer from {768} to {self.h_dim} dims\n")
         else:
             raise NotImplementedError
         self.trainable_module_names = ['trainable_game_mode_token', 'trainable_projection']
@@ -283,10 +222,15 @@ class SupervisedAligner(nn.Module):
             raise NotImplementedError
         return tokenized_gt_action, tokenized_ngt_action, llm_projected_features, oracle_answer
 
-    def preprocess_raw_game(self, obs, extracted_model, extracted_preprocessing):
+    def preprocess_raw_game(self, obs, extracted_model, extracted_preprocessing, feature_pipeline=None, use_vfe=None):
+        if use_vfe:
+            img = obs[0]
+            obs = obs[1]
         observation = extracted_preprocessing(obs)
         with torch.no_grad():
             feats, actions = extracted_model.predict(observation)
+            if use_vfe:
+                feats = feature_pipeline(img)
         return self.preprocess_game(feats, actions)
 
     def preprocess_question_train(self,
@@ -358,7 +302,9 @@ class SupervisedAligner(nn.Module):
                                                                             use_negative_prompt=use_negative_prompt,
                                                                             tokenized_gt_action=tokenized_gt_action,
                                                                             tokenized_ngt_action=tokenized_ngt_action)
-        fusion_tokens = self.trainable_game_mode_token.repeat(batch_size, 1, 1) + llm_projected_features.unsqueeze(1)
+        if len(llm_projected_features.size()) < 3:
+            llm_projected_features = llm_projected_features.unsqueeze(1)
+        fusion_tokens = self.trainable_game_mode_token.repeat(batch_size, 1, 1) + llm_projected_features
         inp_tokens = torch.cat(
             [fusion_tokens,
              feature_game_prompt,
@@ -382,18 +328,23 @@ class SupervisedAligner(nn.Module):
         metric = (act_pred_x == act_pred_y).float().sum().item() / batch_size
         return loss, metric, x
 
-    def reason(self, obs, game, extracted_model, extracted_preprocessing, question=None, sent='pos', fewshot=False):
+    def reason(self, obs, game, extracted_model, extracted_preprocessing, question=None, sent='pos', fewshot=False,
+               feature_pipeline=None, use_vfe=None):
         batch_size = 1
         _, \
         _, \
-        llm_projected_features, oracle_answer = self.preprocess_raw_game(obs, extracted_model, extracted_preprocessing)
+        llm_projected_features, oracle_answer = self.preprocess_raw_game(obs, extracted_model, extracted_preprocessing,
+                                                                         feature_pipeline=feature_pipeline,
+                                                                         use_vfe=use_vfe)
 
         feature_game_prompt = self.preprocess_question_test(game=game,
                                                             question=question,
                                                             fewshot=fewshot,
                                                             sent=sent,
                                                             oracle_answer=oracle_answer)
-        fusion_tokens = self.trainable_game_mode_token.repeat(batch_size, 1, 1) + llm_projected_features.unsqueeze(1)
+        if len(llm_projected_features.size()) < 3:
+            llm_projected_features = llm_projected_features.unsqueeze(0)
+        fusion_tokens = self.trainable_game_mode_token.repeat(batch_size, 1, 1) + llm_projected_features
         inp_tokens = torch.cat(
             [fusion_tokens,
              feature_game_prompt,
@@ -429,30 +380,51 @@ def load_llm(opt_version='facebook/opt-125m'):
         def forward(self, x): return super().forward(x).to(torch.float32)
 
     lm.lm_head = CastOutputToFloat(lm.lm_head)
-    #lm.gradient_checkpointing_enable()
+    # lm.gradient_checkpointing_enable()
     return lm, h_dim, tokenizer
 
 
-def play(model, game='Pong', sent='pos', render=True, fewshot=False):
-    env, _, extracted_model, extracted_preprocessing, _ = ppo_load(game)
+def play(model, game='Pong', sent='pos', render=True, fewshot=False, feature_pipeline=None, use_vfe=None):
+    dual = not (use_vfe is None)
+    env, _, extracted_model, extracted_preprocessing, _ = ppo_load(game, dual=dual)
     with torch.no_grad():
-        obs = env.reset()
+        if dual:
+            obs = (env[0].reset(), env[1].reset())
+        else:
+            obs = env.reset()
         episodic_reward = []
         while True:
             logits, _ = model.reason(obs, game, extracted_model, extracted_preprocessing, question=None, sent=sent,
-                                     fewshot=fewshot)
-            actions, best_next_commands = model.translate_logits_to_button(logits, use_majority_vote=True)
-            obs, rewards, dones, info = env.step(actions)
+                                     feature_pipeline=feature_pipeline,
+                                     fewshot=fewshot, use_vfe=use_vfe)
+            actions, best_next_commands = model.translate_logits_to_button(logits, use_majority_vote=False)
+            if dual:
+                obs_c, rewards_1, dones_1, _ = env[0].step(actions[0])
+                obs_g, rewards_2, dones_2, _ = env[1].step(actions[0])
+                assert rewards_1 == rewards_2
+                assert dones_1 == dones_2
+                rewards = rewards_1
+                dones = dones_1
+                obs = (obs_c, obs_g)
+            else:
+                obs, rewards, dones, _ = env.step(actions[0])
             episodic_reward.append(rewards)
             if render:
                 print(best_next_commands)
-                env.render()
+                if dual:
+                    env[1].render('human')
+                else:
+                    env.render('human')
             ##############
             if not dones:
                 pass
             else:
                 print(f"Game:{game}, Reward:{np.stack(episodic_reward).sum()}")
-                env.close()
+                if dual:
+                    env[0].close()
+                    env[1].close()
+                else:
+                    env.close()
                 break
     return
 
@@ -465,11 +437,11 @@ def align(run_name='latest',
           accum_steps=1,
           path=None,
           batch_size=64,
-          randomized_actions=0.01,
-          inverse_prompt=0.25,
+          randomized_actions=0.00,
+          inverse_prompt=0.00,
           log_freq=1_00,
           save_freq=2_000,
-          caption_loss=0, games=['Breakout', 'Pong']):
+          caption_loss=0, games=['Pong'], use_vfe=None):
     ##################################################################################################################
     lm, h_dim, tokenizer = load_llm(llm)
     llms = llm.split('/')[-1]
@@ -485,7 +457,7 @@ def align(run_name='latest',
     ################################################################################################################
     optimizer = torch.optim.AdamW(
         params=[
-            {'params': model.parameters(), 'lr': 0.001, 'weight_decay': 0.001}
+            {'params': model.parameters(), 'lr': 0.005, 'weight_decay': 0.001}
         ],
         betas=(0.99, 0.95),
         eps=1e-8
@@ -495,23 +467,28 @@ def align(run_name='latest',
     optimizer.step()
 
     ################################################################################################################
-    train_dataloader = DataLoader(
-        MultiModalDS(sources=games,
-                     n_games=[n_games, n_games],
-                     args=[{'random_act_prob': randomized_actions}, {'random_act_prob': randomized_actions}]),
-        batch_size=batch_size,
-        shuffle=True)
+    train_dataset = MultiModalDS(sources=games,
+                                 n_games=[n_games],
+                                 args=[{'random_act_prob': randomized_actions, 'dual': not (use_vfe is None),
+                                        'feature_pipeline': use_vfe}])
+    feature_pipeline = train_dataset.get_pipeline(use_vfe)
+    train_dataloader = DataLoader(train_dataset,
+                                  batch_size=batch_size,
+                                  shuffle=True)
     with torch.cuda.amp.autocast(dtype=GLOBAL_DTYPE):
         for epoch_idx in range(epochs):
             run_epoch_loss = 0
             run_epoch_metric = 0
             for step_idx, batch in enumerate(pbar := tqdm(train_dataloader)):
                 real_index = (epoch_idx * len(train_dataloader)) + step_idx
-                games, raw, feats, gt_action_logits = batch
+                games, feats, gt_action_logits = batch
+                feats = feats.to('cuda')
+                gt_action_logits = gt_action_logits.to('cuda')
                 if random.uniform(0, 1) < inverse_prompt:
                     use_neg_prompt = True
                 else:
                     use_neg_prompt = False
+
                 loss, metric, _ = model(games=games,
                                         feats=feats,
                                         actions=gt_action_logits,
@@ -536,34 +513,39 @@ def align(run_name='latest',
                     print(f"\nLoss @ step {real_index}: {loss.item()} Metric @ step: {metric}")
                     if run_epoch_metric / (step_idx + 1) > 0.9:
 
-                        for game in ['Pong', 'Breakout']:
+                        for game in ['Pong']:
                             print(f"\nGame: {game} Positive Score:")
-                            play(model, game, sent='pos', render=False)
+                            play(model, game, sent='pos', render=False, feature_pipeline=feature_pipeline,
+                                 use_vfe=use_vfe)
                             print(f"\nGame: {game} Negative Score:")
-                            play(model, game, sent='neg', render=False)
+                            play(model, game, sent='neg', render=False, feature_pipeline=feature_pipeline,
+                                 use_vfe=use_vfe)
                             print(f"\nGame: {game} Fewshot positive:")
-                            play(model, game, sent='pos', render=False, fewshot=True)
+                            play(model, game, sent='pos', render=False, feature_pipeline=feature_pipeline,
+                                 use_vfe=use_vfe)
                             print(f"\nGame: {game} Fewshot negative:")
-                            play(model, game, sent='neg', render=False, fewshot=True)
+                            play(model, game, sent='neg', render=False, feature_pipeline=feature_pipeline,
+                                 use_vfe=use_vfe)
                 if real_index % save_freq == save_freq - 1:
                     save_checkpoint({
                         'state_dict': model.get_state_dict(),
                         'optimizer': optimizer.state_dict(),
                     },
-                        f'../model_runs/{run_name}_step_{real_index}_llm_{llms}')
+                        f'../model_runs/{run_name}_step_{real_index}_llm_{llms}_vfe_{use_vfe}')
                     print("Loading from Last CHKPT...\n")
-                    checkpoint = torch.load(f'../model_runs/{run_name}_step_{real_index}_llm_{llms}.pth.tar')
+                    checkpoint = torch.load(
+                        f'../model_runs/{run_name}_step_{real_index}_llm_{llms}_vfe_{use_vfe}.pth.tar')
                     model.load_state_dict(checkpoint['state_dict'], strict=False)
-
 
         # Save At End of Final Epoch #
         save_checkpoint({
             'state_dict': model.get_state_dict(),
             'optimizer': optimizer.state_dict(),
-        }, f'../model_runs/{run_name}_step_{real_index}_llm_{llms}')
+        }, f'../model_runs/{run_name}_step_{real_index}_llm_{llms}_vfe_{use_vfe}')
 
 
-def test_align(path=None, sent='default', fewshot=False, fixed_question=None, llm=None, record=False, games=['Breakout']):
+def pest_align(path=None, sent='default', fewshot=False, fixed_question=None, llm=None, record=False,
+               games=['Breakout'], use_vfe=None):
     lm, h_dim, tokenizer = load_llm(llm)
     model = SupervisedAligner(lm=lm,
                               h_dim=h_dim,
@@ -601,8 +583,8 @@ def test_align(path=None, sent='default', fewshot=False, fixed_question=None, ll
                     #     actions = [env.action_space.sample()]
                     # else:
                     #     actions = oracle_answer
-                    actions, deco = model.translate_logits_to_button(response_logits, use_majority_vote=True)
-                    print(f"Action: {actions[0]} / Full Set: {deco} / Oracle Action: {oracle_answer}")
+                    actions, deco = model.translate_logits_to_button(response_logits, use_majority_vote=False)
+                    print(f"Action: {actions[0]} / Oracle Action: {oracle_answer}")
                     try:
                         obs, rewards, dones, info = env.step(actions)
                     except:
@@ -623,20 +605,21 @@ def test_align(path=None, sent='default', fewshot=False, fixed_question=None, ll
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('-algo', default='ppo')
-    parser.add_argument('-llm', default='facebook/opt-1.3b')
+    parser.add_argument('-llm', default='facebook/opt-125m')
     parser.add_argument('-model_dir', default=None)
-    parser.add_argument('-path', default='../model_runs/l.tar')
-    parser.add_argument('-mode', default='test')
-    parser.add_argument('-test_sent', default='pos')
+    parser.add_argument('-path', default=None)
+    parser.add_argument('-mode', default='train')
+    parser.add_argument('-test_sent', default='neg')
     parser.add_argument('-test_fewshot', default='0')
-    parser.add_argument('-bs', default=1, type=int)
+    parser.add_argument('-bs', default=64, type=int)
     parser.add_argument('-acs', default=1, type=int)
     parser.add_argument('-caption_loss', default=0, type=int)
-    parser.add_argument('-run_name', default='test')
+    parser.add_argument('-run_name', default='test_vfe')
+    parser.add_argument('-use_vfe', default='Clip')
     args = parser.parse_args()
     if args.mode == 'train':
         align(run_name=args.run_name, path=args.path, llm=args.llm, batch_size=args.bs, accum_steps=args.acs,
-              caption_loss=args.caption_loss)
+              caption_loss=args.caption_loss, use_vfe=args.use_vfe)
     else:
-        test_align(path=args.path, llm=args.llm, sent=args.test_sent,
-                   fewshot=True if args.test_fewshot == '1' else False)
+        pest_align(path=args.path, llm=args.llm, sent=args.test_sent,
+                   fewshot=True if args.test_fewshot == '1' else False, record=True, use_vfe=args.use_vfe)
