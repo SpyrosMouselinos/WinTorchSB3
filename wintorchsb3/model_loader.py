@@ -431,15 +431,15 @@ def play(model, game='Pong', sent='pos', render=True, fewshot=False, feature_pip
 
 def align(run_name='latest',
           epochs=500,
-          n_games=1,
+          n_games=5,
           llm='facebook/opt-125m',
           grad_clip=1,
           accum_steps=1,
           path=None,
           batch_size=64,
-          randomized_actions=0.00,
-          inverse_prompt=0.00,
-          log_freq=1_00,
+          randomized_actions=0.02,
+          inverse_prompt=0.25,
+          log_freq=1_000,
           save_freq=2_000,
           caption_loss=0, games=['Pong'], use_vfe=None):
     ##################################################################################################################
@@ -457,7 +457,7 @@ def align(run_name='latest',
     ################################################################################################################
     optimizer = torch.optim.AdamW(
         params=[
-            {'params': model.parameters(), 'lr': 0.005, 'weight_decay': 0.001}
+            {'params': model.parameters(), 'lr': 0.001, 'weight_decay': 0.001}
         ],
         betas=(0.99, 0.95),
         eps=1e-8
