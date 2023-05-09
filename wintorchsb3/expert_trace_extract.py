@@ -81,7 +81,8 @@ def ppo_load_pong(n_envs=1, dual=False):
     env_gray = AtariWrapper(env, grayscale=True)
     env_gray = FrameStack(env_gray, 4)
     if dual:
-        env2 = copy.deepcopy(env)
+        env2 = gym.make('PongNoFrameskip-v4')
+        env2.seed(1995)
         env_color = AtariWrapper(env2, grayscale=False)
         env_color = FrameStack(env_color, 4)
 
