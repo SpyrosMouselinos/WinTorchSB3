@@ -20,6 +20,7 @@ from expert_trace_extract import ExtractedModelPolicy, ppo_load_pong, MultiModal
 # os.chdir('/'.join(os.path.dirname(__file__).split('/')[:-1]))
 CURRENT_DIR = os.getcwd()
 GLOBAL_DTYPE = torch.bfloat16
+GLOBAL_DEVICE = 'cuda'
 
 
 # fp = 'b16'
@@ -71,7 +72,9 @@ class SupervisedAligner(nn.Module):
         self.caption_loss = caption_loss
 
     def get_prompt(self, game, sent='pos', seed=0):
+        # seed = 0
         pos_template_list = [
+            # 'You are an agent that plays xxx. What is a good move to play to win? '
             'This is a frame from the game of xxx. You are an agent playing the game. What would be a good move to play? ',
             'This is a frame from the game of xxx. You are an agent playing the game. What would be a not bad move to play? ',
             'You are playing the game of xxx. What would be your next move if you wanted to win? ',
@@ -81,6 +84,7 @@ class SupervisedAligner(nn.Module):
             'Imagine you are playing xxx. What action would be optimal? '
         ]
         neg_template_list = [
+            # 'You are an agent that plays xxx. What is a bad move to play? '
             'This is a frame from the game of xxx. You are an agent playing the game. What would be a bad move to play? ',
             'As a xxx player, what would be the worst move you could make when trying to respond to your opponent? ',
             'You are playing the game of xxx. What would be your next move if you wanted to lose? ',
@@ -157,7 +161,7 @@ class SupervisedAligner(nn.Module):
             raise NotImplementedError
 
         self.lm.eval()
-        self.lm.cuda()
+        self.lm = self.lm.to(GLOBAL_DEVICE)
         for param in self.lm.parameters():
             param.requires_grad = False
 
@@ -250,7 +254,7 @@ class SupervisedAligner(nn.Module):
                     pad_len = max_pad_length - len(tok_prompt[i])
                     for _ in range(pad_len):
                         tok_prompt[i].append(1)
-            target_tokens = torch.LongTensor(tok_prompt).cuda()
+            target_tokens = torch.LongTensor(tok_prompt).to(GLOBAL_DEVICE)
             feature_game_prompt = self.lm.model.decoder.embed_tokens(target_tokens)
 
         else:
@@ -264,7 +268,7 @@ class SupervisedAligner(nn.Module):
                     pad_len = max_pad_length - len(tok_prompt[i])
                     for _ in range(pad_len):
                         tok_prompt[i].append(1)
-            target_tokens = torch.LongTensor(tok_prompt).cuda()
+            target_tokens = torch.LongTensor(tok_prompt).to(GLOBAL_DEVICE)
             feature_game_prompt = self.lm.model.decoder.embed_tokens(target_tokens)
         return feature_game_prompt, target_tokens
 
@@ -288,8 +292,8 @@ class SupervisedAligner(nn.Module):
         else:
             question = self.tokenizer(question, add_special_tokens=False)['input_ids']
         feature_game_prompt = self.lm.model.decoder.embed_tokens(
-            torch.LongTensor(question).cuda().unsqueeze(
-                0))
+            torch.LongTensor(question).unsqueeze(
+                0).to(GLOBAL_DEVICE))
         return feature_game_prompt
 
     def forward(self, games, feats, actions, use_negative_prompt=False):
@@ -316,8 +320,8 @@ class SupervisedAligner(nn.Module):
         y = target_tokens
         loss_fct = CrossEntropyLoss()
         if self.caption_loss == 1:
-            shift_logits = x[..., 4:-1, :].contiguous()
-            shift_labels = y.contiguous()
+            shift_logits = x[..., fusion_tokens.size()[1]:-1, :].contiguous()
+            shift_labels = y[:, 1:].contiguous()
         else:
             shift_logits = x[..., -2:-1, :].contiguous()
             shift_labels = y[:, -1:].contiguous()
@@ -430,14 +434,14 @@ def play(model, game='Pong', sent='pos', render=True, fewshot=False, feature_pip
 
 
 def align(run_name='latest',
-          epochs=500,
-          n_games=5,
+          epochs=100,
+          n_games=1,
           llm='facebook/opt-125m',
           grad_clip=1,
           accum_steps=1,
           path=None,
           batch_size=64,
-          randomized_actions=0.02,
+          randomized_actions=0.0,
           inverse_prompt=0.25,
           log_freq=1_000,
           save_freq=2_000,
@@ -453,7 +457,7 @@ def align(run_name='latest',
     if path is not None:
         checkpoint = torch.load(path)
         model.load_state_dict(checkpoint['state_dict'], strict=False)
-    model.cuda()
+    model = model.to(GLOBAL_DEVICE)
     ################################################################################################################
     optimizer = torch.optim.AdamW(
         params=[
@@ -462,7 +466,10 @@ def align(run_name='latest',
         betas=(0.99, 0.95),
         eps=1e-8
     )
-    scaler = torch.cuda.amp.GradScaler()
+    if GLOBAL_DEVICE == 'cuda':
+        scaler = torch.cuda.amp.GradScaler()
+    else:
+        scaler = None
     optimizer.zero_grad()
     optimizer.step()
 
@@ -475,15 +482,19 @@ def align(run_name='latest',
     train_dataloader = DataLoader(train_dataset,
                                   batch_size=batch_size,
                                   shuffle=True)
-    with torch.cuda.amp.autocast(dtype=GLOBAL_DTYPE):
+    if GLOBAL_DEVICE == 'cuda':
+        env = torch.cuda.amp.autocast(dtype=GLOBAL_DTYPE)
+    else:
+        env = open('_rand.txt', 'w')
+    with env:
         for epoch_idx in range(epochs):
             run_epoch_loss = 0
             run_epoch_metric = 0
             for step_idx, batch in enumerate(pbar := tqdm(train_dataloader)):
                 real_index = (epoch_idx * len(train_dataloader)) + step_idx
                 games, feats, gt_action_logits = batch
-                feats = feats.to('cuda')
-                gt_action_logits = gt_action_logits.to('cuda')
+                feats = feats.to(GLOBAL_DEVICE)
+                gt_action_logits = gt_action_logits.to(GLOBAL_DEVICE)
                 if random.uniform(0, 1) < inverse_prompt:
                     use_neg_prompt = True
                 else:
@@ -499,13 +510,20 @@ def align(run_name='latest',
                     {'Epoch': epoch_idx, 'Step': real_index, 'Loss': run_epoch_loss / (step_idx + 1),
                      'Accuracy': run_epoch_metric / (step_idx + 1)})
                 loss = loss / accum_steps
-                scaler.scale(loss).backward()
+                if GLOBAL_DEVICE == 'cuda':
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
                 if (real_index + 1) % accum_steps == 0:
                     if grad_clip > 0:
-                        scaler.unscale_(optimizer)
+                        if GLOBAL_DEVICE == 'cuda':
+                            scaler.unscale_(optimizer)
                         nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                    scaler.step(optimizer)
-                    scaler.update()
+                    if GLOBAL_DEVICE == 'cuda':
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
                     optimizer.zero_grad()
 
                 if real_index % log_freq == log_freq - 1:
@@ -557,10 +575,14 @@ def pest_align(path=None, sent='default', fewshot=False, fixed_question=None, ll
         model.load_state_dict(checkpoint['state_dict'], strict=False)
     else:
         print("YOU DIDNT LOAD SHIT!!")
-    model.cuda()
+    model = model.to(GLOBAL_DEVICE)
     model.eval()
     count = 0
-    with torch.cuda.amp.autocast(dtype=GLOBAL_DTYPE):
+    if GLOBAL_DEVICE == 'cuda':
+        env = torch.cuda.amp.autocast(dtype=GLOBAL_DTYPE)
+    else:
+        env = open('_rand.txt', 'w')
+    with env:
         for game in games:
             env, _, extracted_model, extracted_preprocessing, _ = ppo_load(game)
             if record:
@@ -605,16 +627,16 @@ def pest_align(path=None, sent='default', fewshot=False, fixed_question=None, ll
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('-algo', default='ppo')
-    parser.add_argument('-llm', default='facebook/opt-125m')
-    parser.add_argument('-model_dir', default=None)
-    parser.add_argument('-path', default=None)
+    parser.add_argument('-llm', default='facebook/opt-1.3b')
+    parser.add_argument('-model_dir', default='../model_runs/')
+    parser.add_argument('-path', default='../model_runs/tl.tar')
     parser.add_argument('-mode', default='train')
     parser.add_argument('-test_sent', default='neg')
     parser.add_argument('-test_fewshot', default='0')
-    parser.add_argument('-bs', default=64, type=int)
-    parser.add_argument('-acs', default=1, type=int)
-    parser.add_argument('-caption_loss', default=0, type=int)
-    parser.add_argument('-run_name', default='test_vfe')
+    parser.add_argument('-bs', default=8, type=int)
+    parser.add_argument('-acs', default=32, type=int)
+    parser.add_argument('-caption_loss', default=1, type=int)
+    parser.add_argument('-run_name', default='ft_vfe')
     parser.add_argument('-use_vfe', default='Clip')
     args = parser.parse_args()
     if args.mode == 'train':
