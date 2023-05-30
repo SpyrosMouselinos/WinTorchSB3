@@ -20,7 +20,6 @@ from torchvision.transforms import (
 )
 from tqdm import tqdm
 
-from wintorchsb3.video_model_loader import GLOBAL_DEVICE
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 mpl.use('TkAgg')
@@ -82,8 +81,9 @@ def video_collate_fn(examples):
 
 
 class VideoDS(Dataset):
-    def __init__(self, sources, train_randomness_multiplier, split):
+    def __init__(self, sources, train_randomness_multiplier, split, batch_size_extract=8):
         self.VIDEOS = ['UCF_101']
+        self.batch_size_extract = batch_size_extract
         self.sources = sources
         self.randomness_multiplier = train_randomness_multiplier
         self._prepare_everything(source=sources[0], pipeline='VideoMae')
@@ -171,16 +171,16 @@ class VideoDS(Dataset):
 
         self.output_representations = []
         self.output_labels = []
-        dataloader = DataLoader(data, batch_size=8, shuffle=False, collate_fn=video_collate_fn)
+        dataloader = DataLoader(data, batch_size=self.batch_size_extract, shuffle=False, collate_fn=video_collate_fn)
         with torch.no_grad():
             for random_transformation_id in range(rand_mul):
                 for step_idx, batch in enumerate(tqdm(dataloader)):
                     pixel_values, labels = batch['pixel_values'], batch['labels']
-                    pixel_values = pixel_values.to(GLOBAL_DEVICE)
+                    pixel_values = pixel_values.to('cuda')
                     representations = self.model(pixel_values=pixel_values)
                     for f,l in zip(representations.logits.cpu(), labels):
                         self.output_representations.append(f)
-                        self.output_labels.append(labels)
+                        self.output_labels.append(l)
 
         self.total_examples = len(self.output_representations)
         return
