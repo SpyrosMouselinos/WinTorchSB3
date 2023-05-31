@@ -131,4 +131,7 @@ dmypy.json
 model_runs/
 
 UCF-101/
+UCF101_full/
+UCF101_full_repr/
 UCF101_subset/
+UCF101_subset_repr/

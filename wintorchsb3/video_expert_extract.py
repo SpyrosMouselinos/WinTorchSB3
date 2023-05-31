@@ -1,4 +1,6 @@
 import os
+import pickle
+
 import torch
 from torch.utils.data import Dataset, DataLoader
 import matplotlib as mpl
@@ -20,7 +22,6 @@ from torchvision.transforms import (
 )
 from tqdm import tqdm
 
-
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 mpl.use('TkAgg')
 
@@ -34,7 +35,7 @@ def locate_dataset(source):
                     print(f'Split {split} found!')
         from glob import glob
         all_video_file_paths = glob('../UCF101_subset/*/*/*', recursive=True)
-        class_labels = sorted({str(path)[3:].replace('\\','/').split("/")[2] for path in all_video_file_paths})
+        class_labels = sorted({str(path)[3:].replace('\\', '/').split("/")[2] for path in all_video_file_paths})
         label2id = {label: i for i, label in enumerate(class_labels)}
         id2label = {i: label for label, i in label2id.items()}
 
@@ -50,8 +51,9 @@ def load_model(source, pipeline):
     if pipeline not in SUPPORTED_PIPELINES:
         raise ValueError(f'Supported Pipelines are: {SUPPORTED_PIPELINES}')
     from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
-    model = VideoMAEForVideoClassification.from_pretrained("MCG-NJU/videomae-base", label2id=label2id, id2label=id2label,
-                                                   ignore_mismatched_sizes=False)
+    model = VideoMAEForVideoClassification.from_pretrained("MCG-NJU/videomae-base", label2id=label2id,
+                                                           id2label=id2label,
+                                                           ignore_mismatched_sizes=False)
     model.classifier = torch.nn.Identity()
     model.to('cuda')
     processor = VideoMAEImageProcessor.from_pretrained("MCG-NJU/videomae-base")
@@ -81,8 +83,9 @@ def video_collate_fn(examples):
 
 
 class VideoDS(Dataset):
-    def __init__(self, sources, train_randomness_multiplier, split, batch_size_extract=8):
+    def __init__(self, sources, train_randomness_multiplier, split, batch_size_extract=8, data_used='subset'):
         self.VIDEOS = ['UCF_101']
+        self.data_used = data_used
         self.batch_size_extract = batch_size_extract
         self.sources = sources
         self.randomness_multiplier = train_randomness_multiplier
@@ -120,7 +123,7 @@ class VideoDS(Dataset):
                 ]
             )
             d = pytorchvideo.data.Ucf101(
-                data_path=os.path.join('../UCF101_subset', "train"),
+                data_path=os.path.join(f'../UCF101_{self.data_used}', "train"),
                 clip_sampler=pytorchvideo.data.make_clip_sampler("random", self.clip_duration),
                 decode_audio=False,
                 transform=train_transform,
@@ -143,14 +146,14 @@ class VideoDS(Dataset):
             )
             if split == 'val':
                 d = pytorchvideo.data.Ucf101(
-                    data_path=os.path.join('../UCF101_subset', "val"),
+                    data_path=os.path.join(f'../UCF101_{self.data_used}', "val"),
                     clip_sampler=pytorchvideo.data.make_clip_sampler("uniform", self.clip_duration),
                     decode_audio=False,
                     transform=val_transform,
                 )
             else:
                 d = pytorchvideo.data.Ucf101(
-                    data_path=os.path.join('../UCF101_subset', "test"),
+                    data_path=os.path.join(f'../UCF101_{self.data_used}', "test"),
                     clip_sampler=pytorchvideo.data.make_clip_sampler("uniform", self.clip_duration),
                     decode_audio=False,
                     transform=val_transform,
@@ -167,22 +170,39 @@ class VideoDS(Dataset):
         else:
             raise ValueError
 
-        data = self._load_data(split)
+        if not os.path.exists(f'../UCF101_{self.data_used}_repr/'):
+            os.mkdir(f'../UCF101_{self.data_used}_repr/')
+            os.mkdir(f'../UCF101_{self.data_used}_repr/train')
+            os.mkdir(f'../UCF101_{self.data_used}_repr/val')
+            os.mkdir(f'../UCF101_{self.data_used}_repr/test')
+        else:
+            if not os.path.exists(f'../UCF101_{self.data_used}_repr/{split}/{split}_data.pkl'):
+                data = self._load_data(split)
 
-        self.output_representations = []
-        self.output_labels = []
-        dataloader = DataLoader(data, batch_size=self.batch_size_extract, shuffle=False, collate_fn=video_collate_fn)
-        with torch.no_grad():
-            for random_transformation_id in range(rand_mul):
-                for step_idx, batch in enumerate(tqdm(dataloader)):
-                    pixel_values, labels = batch['pixel_values'], batch['labels']
-                    pixel_values = pixel_values.to('cuda')
-                    representations = self.model(pixel_values=pixel_values)
-                    for f,l in zip(representations.logits.cpu(), labels):
-                        self.output_representations.append(f)
-                        self.output_labels.append(l)
+                self.output_representations = []
+                self.output_labels = []
+                dataloader = DataLoader(data, batch_size=self.batch_size_extract, shuffle=False,
+                                        collate_fn=video_collate_fn)
+                with torch.no_grad():
+                    for random_transformation_id in range(rand_mul):
+                        for step_idx, batch in enumerate(tqdm(dataloader)):
+                            pixel_values, labels = batch['pixel_values'], batch['labels']
+                            pixel_values = pixel_values.to('cuda')
+                            representations = self.model(pixel_values=pixel_values)
+                            for f, l in zip(representations.logits.cpu(), labels):
+                                self.output_representations.append(f)
+                                self.output_labels.append(l)
 
-        self.total_examples = len(self.output_representations)
+                self.total_examples = len(self.output_representations)
+                pickle_store = {'video_features': self.output_representations, 'labels': self.output_labels}
+                with open(f'../UCF101_{self.data_used}_repr/{split}/{split}_data.pkl', 'wb') as fout:
+                    pickle.dump(pickle_store, fout)
+            else:
+                with open(f'../UCF101_{self.data_used}_repr/{split}/{split}_data.pkl', 'rb') as fin:
+                    data = pickle.load(fin)
+                    self.output_representations = data['video_features']
+                    self.output_labels = data['labels']
+                    self.total_examples = len(self.output_representations)
         return
 
     def __len__(self):
@@ -190,7 +210,6 @@ class VideoDS(Dataset):
 
     def __getitem__(self, idx):
         return self.output_representations[idx], self.output_labels[idx]
-
 
 # train_dataloader = DataLoader(
 #     VideoDS(sources=['UCF_101'], train_randomness_multiplier=5, split='val'),

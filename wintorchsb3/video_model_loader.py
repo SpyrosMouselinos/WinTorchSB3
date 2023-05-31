@@ -26,7 +26,7 @@ class VideoAligner(nn.Module):
                  lm,
                  h_dim,
                  tokenizer,
-                 caption_loss=0, double_priest_loss_p=0.5):
+                 double_priest_loss_p=0.5):
         super().__init__()
         self.lm = lm
         self.tokenizer = tokenizer
@@ -34,7 +34,6 @@ class VideoAligner(nn.Module):
         self.prepare_models()
         self.initialize_trainable()
         self.initialize_prompt()
-        self.caption_loss = caption_loss
         self.double_priest_loss_p = double_priest_loss_p
 
     def get_state_dict(self, efficient=True):
@@ -375,15 +374,14 @@ def train_align(run_name='latest',
                 path=None,
                 batch_size=64,
                 val_freq=3_000,
-                caption_loss=0):
+                data_used='subset'):
     best_metric = 0
     ##################################################################################################################
     lm, h_dim, tokenizer = load_llm(llm)
     llms = llm.split('/')[-1]
     model = VideoAligner(lm=lm,
                          h_dim=h_dim,
-                         tokenizer=tokenizer,
-                         caption_loss=caption_loss)
+                         tokenizer=tokenizer)
     if path is not None:
         checkpoint = torch.load(path)
         model.load_state_dict(checkpoint['state_dict'], strict=False)
@@ -404,10 +402,10 @@ def train_align(run_name='latest',
     optimizer.step()
 
     ################################################################################################################
-    train_dataset = VideoDS(sources=['UCF_101'], train_randomness_multiplier=1, split='train')
+    train_dataset = VideoDS(sources=['UCF_101'], train_randomness_multiplier=1, split='train', data_used=data_used)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataset = VideoDS(sources=['UCF_101'], train_randomness_multiplier=4, split='val')
-    val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=True)
+    val_dataset = VideoDS(sources=['UCF_101'], train_randomness_multiplier=1, split='val', data_used=data_used)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
     if GLOBAL_DEVICE == 'cuda':
         env = torch.cuda.amp.autocast(dtype=GLOBAL_DTYPE)
     else:
@@ -471,21 +469,21 @@ def train_align(run_name='latest',
 
 
 def validate_align(path=None,
-                   llm=None, model=None, dataloader=None):
+                   llm=None, model=None, dataloader=None, data_used='subset'):
     if path is not None:
         if llm is None:
             print("LLM can not be None when loading from a pre-trained file!\n")
         checkpoint = torch.load(path)
         lm, h_dim, tokenizer = load_llm(llm)
-        model = VideoAligner(lm=lm, h_dim=h_dim, tokenizer=tokenizer, caption_loss=0)
+        model = VideoAligner(lm=lm, h_dim=h_dim, tokenizer=tokenizer)
         model.load_state_dict(checkpoint['state_dict'], strict=False)
     else:
         print("Loading directly from passed model...\n")
 
     if dataloader is None:
         print("You need to pass a dataset you moron! I will equip the test split of UCF101!")
-        dataset = VideoDS(sources=['UCF_101'], train_randomness_multiplier=1, split='test')
-        dataloader = DataLoader(dataset, batch_size=8, shuffle=False)
+        dataset = VideoDS(sources=['UCF_101'], train_randomness_multiplier=1, split='test', data_used=data_used)
+        dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
 
     model = model.to(GLOBAL_DEVICE)
     model.eval()
@@ -519,12 +517,13 @@ if __name__ == '__main__':
     parser.add_argument('-bs', default=8, type=int)
     parser.add_argument('-acs', default=4, type=int)
     parser.add_argument('-run_name', default='ucf_vmae')
+    parser.add_argument('-data_used', default='subset')
     args = parser.parse_args()
     if args.mode == 'train':
         train_align(run_name=args.run_name,
                     path=args.path,
                     llm=args.llm,
                     batch_size=args.bs,
-                    accum_steps=args.acs)
+                    accum_steps=args.acs, data_used=args.data_used)
     else:
-        validate_align(path=args.path, llm=args.llm)
+        validate_align(path=args.path, llm=args.llm, data_used=args.data_used)
