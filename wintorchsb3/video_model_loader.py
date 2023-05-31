@@ -1,6 +1,8 @@
 import os
 import random
 from argparse import ArgumentParser
+
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
@@ -8,7 +10,7 @@ from transformers import OPTForCausalLM, GPT2Tokenizer
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 
-from wintorchsb3.video_expert_extract import VideoDS
+from video_expert_extract import VideoDS
 
 CURRENT_DIR = os.getcwd()
 GLOBAL_DTYPE = torch.bfloat16
@@ -161,8 +163,9 @@ class VideoAligner(nn.Module):
     def initialize_trainable(self):
         self.trainable_game_mode_token = nn.Parameter(torch.randn(4, self.h_dim), requires_grad=True)
         self.trainable_projection = nn.Linear(in_features=768, out_features=self.h_dim)
+        self.trainable_answer_prompt = nn.Parameter(torch.randn(1, self.h_dim), requires_grad=True)
         print(f"Initialized a Trainable Projection Layer from {768} to {self.h_dim} dims\n")
-        self.trainable_module_names = ['trainable_game_mode_token', 'trainable_projection']
+        self.trainable_module_names = ['trainable_game_mode_token', 'trainable_projection', 'trainable_answer_prompt']
         return
 
     def option_a(self, feats, labels):
@@ -185,7 +188,7 @@ class VideoAligner(nn.Module):
 
         ## Doing Label 1
         gt_label_1_prompt = [self.qtokenized_action_registry[f] for f in labels_1]
-        padded_gt_label_1_prompt = self.pad_list_of_lists(gt_label_1_prompt, return_as='list', pad_item=2, max_pad=8)
+        padded_gt_label_1_prompt = self.pad_list_of_lists(gt_label_1_prompt, return_as='list', pad_item=1437, max_pad=8)
         emb_padded_gt_label_1_prompt = [self.lm.model.decoder.embed_tokens(torch.LongTensor(f).to(GLOBAL_DEVICE)) for f
                                         in
                                         padded_gt_label_1_prompt]
@@ -194,12 +197,12 @@ class VideoAligner(nn.Module):
         emb_answer_1 = self.emb_solution_1
         xxx = torch.stack(emb_padded_gt_label_1_prompt, dim=0)
         complete_emb_prompt_1 = torch.concat(
-            [prompt_pt_1_as_embeddings, xxx,
+            [prompt_pt_1_as_embeddings, xxx, self.trainable_answer_prompt.repeat(half_bs, 1, 1),
              emb_answer_1.repeat(half_bs, 1, 1)], dim=1)
 
         ## Doing label 2
         gt_label_2_prompt = [self.qtokenized_action_registry[f] for f in labels_2]
-        padded_gt_label_2_prompt = self.pad_list_of_lists(gt_label_2_prompt, return_as='list', pad_item=2, max_pad=8)
+        padded_gt_label_2_prompt = self.pad_list_of_lists(gt_label_2_prompt, return_as='list', pad_item=1437, max_pad=8)
         emb_padded_gt_label_2_prompt = [self.lm.model.decoder.embed_tokens(torch.LongTensor(f).to(GLOBAL_DEVICE)) for f
                                         in
                                         padded_gt_label_2_prompt]
@@ -207,7 +210,7 @@ class VideoAligner(nn.Module):
         emb_answer_2 = self.emb_solution_2
         xxx = torch.stack(emb_padded_gt_label_2_prompt, dim=0)
         complete_emb_prompt_2 = torch.concat(
-            [prompt_pt_1_as_embeddings, xxx,
+            [prompt_pt_1_as_embeddings, xxx, self.trainable_answer_prompt.repeat(half_bs, 1, 1),
              emb_answer_2.repeat(half_bs, 1, 1)], dim=1)
 
         y = torch.LongTensor(tok_answer_1 * half_bs + tok_answer_2 * half_bs).view(batch_size, -1).to(GLOBAL_DEVICE)
@@ -259,9 +262,11 @@ class VideoAligner(nn.Module):
                 emb_answers_2.append(self.emb_solution_yes)
 
         complete_emb_prompt_1 = torch.concat(
-            [prompt_pt_1_as_embeddings, torch.stack(emb_answers_1, dim=0)], dim=1)
+            [prompt_pt_1_as_embeddings, self.trainable_answer_prompt.repeat(half_bs, 1, 1),
+             torch.stack(emb_answers_1, dim=0)], dim=1)
         complete_emb_prompt_2 = torch.concat(
-            [prompt_pt_2_as_embeddings, torch.stack(emb_answers_2, dim=0)], dim=1)
+            [prompt_pt_2_as_embeddings, self.trainable_answer_prompt.repeat(half_bs, 1, 1),
+             torch.stack(emb_answers_2, dim=0)], dim=1)
 
         y = torch.LongTensor(tokenized_answers_1 + tokenized_answers_2).view(batch_size, -1).to(GLOBAL_DEVICE)
         final_llm_embs = torch.concat([complete_emb_prompt_1, complete_emb_prompt_2], dim=0)
@@ -285,8 +290,9 @@ class VideoAligner(nn.Module):
         padded_gt_labels = self.pad_list_of_lists(gt_labels, return_as='list', pad_item=2)
         emb_padded_gt_labels = [self.lm.model.decoder.embed_tokens(torch.LongTensor(f).to(GLOBAL_DEVICE)) for f in
                                 padded_gt_labels]
-        final_llm_embs = torch.concat([prompt_as_embeddings, torch.stack(emb_padded_gt_labels, dim=0)], dim=1)
-        return torch.LongTensor(padded_gt_labels).to(GLOBAL_DEVICE), final_llm_embs, prompt_as_embeddings.size()[1]
+        final_llm_embs = torch.concat([prompt_as_embeddings, self.trainable_answer_prompt.repeat(batch_size, 1, 1),
+                                       torch.stack(emb_padded_gt_labels, dim=0)], dim=1)
+        return torch.LongTensor(padded_gt_labels).to(GLOBAL_DEVICE), final_llm_embs, prompt_as_embeddings.size()[1] + 1
 
     def pad_list_of_lists(self, inp, pad_item=2, return_as='pt', max_pad=None):
         # Max length #
@@ -304,7 +310,7 @@ class VideoAligner(nn.Module):
     def preprocess_video(self, feats, labels):
         llm_projected_features = self.trainable_projection(feats)
         seed = random.uniform(0, 1)
-        if (seed < self.double_priest_loss_p) and True:
+        if (seed < self.double_priest_loss_p):
             if seed < self.double_priest_loss_p / 2:
                 ### A: Mix 2 images and ask which is doing [Label] ###
                 y, x_concat_y_e, answer_idx = self.option_a(feats=llm_projected_features, labels=labels)
@@ -319,8 +325,8 @@ class VideoAligner(nn.Module):
         return y, x_concat_y_e, answer_idx
 
     def forward(self, feats, labels):
-        batch_size = feats.size()[0]
         y, x_concat_y_e, answer_idx = self.preprocess_video(feats, labels)
+
         xp_concat_yp_e = self.lm(inputs_embeds=x_concat_y_e).logits
         loss_fct = CrossEntropyLoss(ignore_index=2)
         ### It only makes sense to train it for the answer ###
@@ -329,11 +335,13 @@ class VideoAligner(nn.Module):
 
         loss = loss_fct(shift_logits.view(-1, xp_concat_yp_e.size()[-1]), shift_labels.view(-1))
         ### ACC ###
-        act_pred_x = torch.argmax(xp_concat_yp_e[:, answer_idx - 1:-1, :], dim=2).view(-1)
-        act_pred_y = y.view(-1)
-        metric = (act_pred_x == act_pred_y).float().sum().item() / batch_size
-        metric_no_pad = (act_pred_y == 2).float().sum().item() / batch_size
-        unbiased_metric = min(0, metric - metric_no_pad)
+        act_pred_x = torch.argmax(xp_concat_yp_e[:, answer_idx - 1:-1, :], dim=2).view(-1).detach().cpu().numpy()
+        act_pred_y = y.view(-1).detach().cpu().numpy()
+
+        correct_answers = 1.0 * (act_pred_x[np.where(act_pred_y != 2)] == act_pred_y[np.where(act_pred_y != 2)])
+        eligible_answers = act_pred_y[np.where(act_pred_y != 2)].shape[0]
+        unbiased_metric = np.sum(correct_answers) / eligible_answers
+
         return loss, unbiased_metric
 
 
@@ -360,13 +368,13 @@ def load_llm(opt_version='facebook/opt-125m'):
 
 
 def train_align(run_name='latest',
-                epochs=1_000,
+                epochs=5_000,
                 llm='facebook/opt-125m',
                 grad_clip=1,
                 accum_steps=1,
                 path=None,
                 batch_size=64,
-                val_freq=1_000,
+                val_freq=3_000,
                 caption_loss=0):
     best_metric = 0
     ##################################################################################################################
@@ -396,7 +404,7 @@ def train_align(run_name='latest',
     optimizer.step()
 
     ################################################################################################################
-    train_dataset = VideoDS(sources=['UCF_101'], train_randomness_multiplier=50, split='train')
+    train_dataset = VideoDS(sources=['UCF_101'], train_randomness_multiplier=1, split='train')
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_dataset = VideoDS(sources=['UCF_101'], train_randomness_multiplier=4, split='val')
     val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=True)

@@ -129,3 +129,6 @@ dmypy.json
 .pyre/
 
 model_runs/
+
+UCF-101/
+UCF101_subset/
