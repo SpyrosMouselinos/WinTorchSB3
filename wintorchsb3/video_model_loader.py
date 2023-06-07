@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from video_expert_extract import VideoDS
 
 CURRENT_DIR = os.getcwd()
-GLOBAL_DTYPE = torch.bfloat16
+GLOBAL_DTYPE = torch.float16
 GLOBAL_DEVICE = 'cuda'
 
 

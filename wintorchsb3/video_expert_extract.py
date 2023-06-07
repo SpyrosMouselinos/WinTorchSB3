@@ -175,34 +175,34 @@ class VideoDS(Dataset):
             os.mkdir(f'../UCF101_{self.data_used}_repr/train')
             os.mkdir(f'../UCF101_{self.data_used}_repr/val')
             os.mkdir(f'../UCF101_{self.data_used}_repr/test')
+
+        if not os.path.exists(f'../UCF101_{self.data_used}_repr/{split}/{split}_data.pkl'):
+            data = self._load_data(split)
+
+            self.output_representations = []
+            self.output_labels = []
+            dataloader = DataLoader(data, batch_size=self.batch_size_extract, shuffle=False,
+                                    collate_fn=video_collate_fn)
+            with torch.no_grad():
+                for random_transformation_id in range(rand_mul):
+                    for step_idx, batch in enumerate(tqdm(dataloader)):
+                        pixel_values, labels = batch['pixel_values'], batch['labels']
+                        pixel_values = pixel_values.to('cuda')
+                        representations = self.model(pixel_values=pixel_values)
+                        for f, l in zip(representations.logits.cpu(), labels):
+                            self.output_representations.append(f)
+                            self.output_labels.append(l)
+
+            self.total_examples = len(self.output_representations)
+            pickle_store = {'video_features': self.output_representations, 'labels': self.output_labels}
+            with open(f'../UCF101_{self.data_used}_repr/{split}/{split}_data.pkl', 'wb') as fout:
+                pickle.dump(pickle_store, fout)
         else:
-            if not os.path.exists(f'../UCF101_{self.data_used}_repr/{split}/{split}_data.pkl'):
-                data = self._load_data(split)
-
-                self.output_representations = []
-                self.output_labels = []
-                dataloader = DataLoader(data, batch_size=self.batch_size_extract, shuffle=False,
-                                        collate_fn=video_collate_fn)
-                with torch.no_grad():
-                    for random_transformation_id in range(rand_mul):
-                        for step_idx, batch in enumerate(tqdm(dataloader)):
-                            pixel_values, labels = batch['pixel_values'], batch['labels']
-                            pixel_values = pixel_values.to('cuda')
-                            representations = self.model(pixel_values=pixel_values)
-                            for f, l in zip(representations.logits.cpu(), labels):
-                                self.output_representations.append(f)
-                                self.output_labels.append(l)
-
+            with open(f'../UCF101_{self.data_used}_repr/{split}/{split}_data.pkl', 'rb') as fin:
+                data = pickle.load(fin)
+                self.output_representations = data['video_features']
+                self.output_labels = data['labels']
                 self.total_examples = len(self.output_representations)
-                pickle_store = {'video_features': self.output_representations, 'labels': self.output_labels}
-                with open(f'../UCF101_{self.data_used}_repr/{split}/{split}_data.pkl', 'wb') as fout:
-                    pickle.dump(pickle_store, fout)
-            else:
-                with open(f'../UCF101_{self.data_used}_repr/{split}/{split}_data.pkl', 'rb') as fin:
-                    data = pickle.load(fin)
-                    self.output_representations = data['video_features']
-                    self.output_labels = data['labels']
-                    self.total_examples = len(self.output_representations)
         return
 
     def __len__(self):
